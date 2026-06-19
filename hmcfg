@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HM="$(dirname "$(realpath "$0")")"
+if [ "${HM#/nix/store}" != "$HM" ]; then
+  HM="$HOME/.config/home-manager"
+else
+  until [ -f "$HM/flake.nix" ]; do HM="$(dirname "$HM")"; done
+fi
+
+MANIFEST="$HM/.bootstrap-manifest"
+SUB_CMD="${1:-}"; shift 2>/dev/null || true
+hm_switch() { home-manager switch --flake "$HM#$hm_target"; }
+uname -r | grep -qiE 'microsoft|wsl' && hm_target=tuna-wsl || hm_target=tuna
+
+# fallback
+fallback() {
+  echo "Nix not found - using fallback..."
+  : > "$MANIFEST"
+  track() { echo "$1" >> "$MANIFEST"; }
+  DOTDIR="$HM/dotfiles"; CONFDIR="$HOME/.config"
+
+  while IFS= read -r -d '' src; do
+    rel="${src#$DOTDIR/}"
+    dst="$CONFDIR/$rel"
+    mkdir -p "$(dirname "$dst")"
+    ln -sf "$src" "$dst"; track "$dst"
+  done < <(find "$DOTDIR" -type f ! -path '*/irssi/*' ! -name default.nix ! -name .git -print0)
+
+  for src in "$DOTDIR"/irssi/*; do
+    [ -f "$src" ] || continue; name="$(basename "$src")"
+    [ "$name" = ".gitignore" ] && continue
+    mkdir -p "$HOME/.irssi"
+    ln -sf "$src" "$HOME/.irssi/$name"; track "$HOME/.irssi/$name"
+  done
+
+  if [ -L "$HOME/scripts" ]; then rm "$HOME/scripts"; fi
+  if [ ! -e "$HOME/scripts" ]; then ln -s "$HM/scripts" "$HOME/scripts"; track "$HOME/scripts"; fi
+
+  AGE_KEY="$HOME/.ssh/agenix"
+  if ! command -v age &>/dev/null; then
+    echo "  Warning: 'age' not found - skipping secret decryption"
+  elif [ ! -f "$AGE_KEY" ]; then
+    echo "  Warning: age key $AGE_KEY not found - skipping secret decryption"
+  else
+    deploy_secret() {
+      local file="$1" dest="$2" mode="${3:-0644}"
+      mkdir -p "$(dirname "$dest")"
+      age -d -i "$AGE_KEY" "$file" > "$dest"
+      chmod "$mode" "$dest"; track "$dest"
+    }
+
+    deploy_secret "$HM/secrets/dotfiles/wegorc.age" "$HOME/.wegorc"
+    deploy_secret "$HM/secrets/dotfiles/irssi-config.age" "$HOME/.irssi/config"
+    deploy_secret "$HM/secrets/dotfiles/git-config.age" "$HOME/.config/git/config"
+    deploy_secret "$HM/secrets/dotfiles/git-config.gitlab.age" "$HOME/.config/git/config.gitlab"
+    deploy_secret "$HM/secrets/dotfiles/sesh-toml.age" "$HOME/.config/sesh/sesh.toml"
+    deploy_secret "$HM/secrets/ipi-token.age" "/tmp/ipi-token"
+    deploy_secret "$HM/secrets/dotfiles/proxychains-conf.age" "$HOME/.proxychains/proxychains.conf"
+
+    mkdir -p "$HOME/scripts"
+    for f in "$HM"/secrets/scripts/*.age; do
+      [ -f "$f" ] || continue
+      deploy_secret "$f" "$HOME/scripts/$(basename "$f" .age)" "+x"
+    done
+  fi
+
+  echo -e "\n Symlinking complete. Run '$0 unlink' to undo."
+}
+
+# subcommands
+case "$SUB_CMD" in
+  switch)
+    if command -v home-manager &>/dev/null; then
+      echo -e "\e[33mNote:\e[0m Run 'hmcfg upgrade' to update packages"
+      hm_switch
+    else
+      fallback
+    fi
+    ;;
+
+  upgrade)
+    if ! command -v nix &>/dev/null; then
+      echo "Nix not found - cannot run 'nix flake update'." >&2
+      exit 1
+    fi
+    nix flake update --flake "$HM"; hm_switch
+    ;;
+
+  bump)
+    [ $# -eq 1 ] || { echo "Usage: $0 bump <submodule> (see '$0' for help)" >&2; exit 1; }
+    [ -d "$HM/dotfiles/$1" ] || { echo "Submodule not found: dotfiles/$1" >&2; exit 1; }
+    (cd "$HM/dotfiles/$1" && git push)
+    nix flake update --flake "$HM" "$1"
+    git -C "$HM" add flake.lock "dotfiles/$1" && git -C "$HM" commit -m "Bump $1"
+    ;;
+
+  unlink)
+    if command -v home-manager &>/dev/null; then
+      echo "Home-manager is available. Use \`$0 switch\` to manage configs, not unlink."; exit 1
+    fi
+    [ -f "$MANIFEST" ] || { echo "No bootstrap manifest at $MANIFEST - nothing to undo."; exit 1; }
+    echo "Undoing bootstrap..."
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      [ -e "$path" ] || [ -L "$path" ] && rm -rf "$path" && echo "  removed $path"
+    done < "$MANIFEST"
+    rm -f "$MANIFEST"; echo "Done."
+    ;;
+
+  *)
+    echo "Usage: $0 <command>"
+    echo ""
+    echo "Commands:"
+    echo "  switch              Apply config (home-manager switch or fallback)"
+    echo "  upgrade             nix flake update, then switch"
+    echo "  bump <submodule>    Push submodule, bump flake lock, commit"
+    echo "  unlink              Undo fallback bootstrap (only without Nix)"
+    exit 1
+    ;;
+esac
+

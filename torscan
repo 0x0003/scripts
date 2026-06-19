@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+curl --compressed -s https://torscan-ru.ntc.party/relays.txt
+

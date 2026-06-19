@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+# bulk rename files using regex
+# example: fdrename '.*_cen\.rpgmvp' '_cen' '.'
+#   removes '_cen' from all .rpgmvp files in the current directory
+
+if [ $# -ne 3 ]; then
+  echo "Usage: $0 <fd-pattern> <sed-replacement> <directory>"
+  exit 1
+fi
+
+pattern="$1"
+replacement="$2"
+dir="$3"
+
+fd --type file "$pattern" "$dir" |
+  while IFS= read n; do
+    mv -v "$n" "$(echo "$n" | sed -r "s/$replacement//g")"
+  done
+

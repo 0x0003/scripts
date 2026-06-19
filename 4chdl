@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+
+# Download all content from thread into current directory
+
+wget --recursive --no-directories --accept '.jpg,.jpeg,.png,.gif,.webm' --reject '*s.jpg' --span-hosts --domains=i.4cdn.org,is2.4chan.org,is3.4chan.org --execute robots=off --wait=2 --random-wait --limit-rate=800k -U 'Mozilla/5.0' $1
+

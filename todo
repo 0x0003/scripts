@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+
+declare -r TMPDIR=$HOME/notes
+declare -r TODOLIST=$HOME/notes/todo.txt
+
+show_help () {
+cat << HALP
+USAGE
+  $(basename $0) OPTIONS
+
+OPTIONS
+  init          initialize
+  h/help        show this message
+  a/add         add a new task
+  e/edit        open todolist with $EDITOR
+  l/li/list     list all tasks
+  s/search      search list with a query
+  d/r/rm/delete delete a task by ID
+  c/cl/clear    delete all tasks
+HALP
+}
+
+initialize () {
+  if [ ! -d $TMPDIR ];then
+    mkdir -p $TMPDIR
+    echo "Created $TMPDIR"
+  else
+    echo "$TMPDIR already exists"
+  fi
+  if [ ! -f $TODOLIST ];then
+    touch $TODOLIST
+    echo "Created $TODOLIST"
+  else
+    echo "$TODOLIST already exists"
+  fi
+}
+
+add () {
+  max_count=`tail -1 $TODOLIST | cut -d'.' -f 1`
+  if [[ 10#$max_count -lt 9 ]]; then
+    max_count="0"$((10#$max_count+1))
+  else
+    max_count=$((10#$max_count+1))
+  fi
+
+  if [ $# = 0 ];then
+    echo "Not enough arguments."
+    exit 1
+  fi
+
+  if [ $# = 1 ];then
+    echo "$max_count.  $1" >> $TODOLIST
+  fi
+
+  if [ $# -gt 1 ];then
+    count=$#
+    for par in $@
+    do
+      var=$var" "$par
+    done
+    echo "$max_count. $var" >> $TODOLIST
+  fi
+}
+
+delete () {
+  rm_id=$1
+  max_count=`tail -1 $TODOLIST | cut -d'.' -f 1`
+  if  [[ 10#$rm_id -le 9 && "$rm_id" != "0"* ]]; then
+    rm_id="0"$rm_id
+  fi
+  if [ $rm_id -le $max_count ]; then
+    grep -v "^$rm_id." $TODOLIST > $TMPDIR/todotmp && mv $TMPDIR/todotmp $TODOLIST
+    # rm $TMPDIR/todotmp 2>/dev/null
+  else
+    echo "Specified ID does not exist."
+    exit 1
+  fi
+}
+
+list () {
+  cat $TODOLIST | sort
+}
+
+reset () {
+  num=`cat $TODOLIST | wc -l`
+  sed -i '1,$d' $TODOLIST
+  echo "$num task(s) removed"
+}
+
+search () {
+  if [ -z $@ ]
+    then
+      read -p "Search for: " search_query
+      search $search_query
+    else
+    result=`grep "$@" $TODOLIST`
+    search_total=`grep "$@" $TODOLIST | wc -l`
+      [ -z $search_total ] && search_total="0" || search_total=$search_total
+
+    echo "Results: "$search_total
+    echo "${result}"
+  fi
+}
+
+edit () {
+  builtin cd $TMPDIR
+  $EDITOR $TODOLIST
+}
+
+case $1 in
+  "init")
+    initialize
+    ;;
+  "a"|"add")
+    add ${*:2}
+    ;;
+  "d"|"r"|"rm"|"delete")
+    delete ${*:2}
+    ;;
+  "h"|"help")
+    show_help
+    ;;
+  "l"|"li"|"list")
+    list
+    ;;
+  "c"|"cl"|"clear")
+    reset
+    ;;
+  "s"|"search")
+    search ${*:2}
+    ;;
+  "e"|"edit")
+    edit
+    ;;
+  *)
+    show_help
+  ;;
+esac
+

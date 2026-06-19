@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+start="$(( $(date '+%s') + $1))"
+while [ $start -ge $(date +%s) ]; do
+  time="$(( $start - $(date +%s) ))"
+  printf '%s\r' "$(date -u -d "@$time" +%H:%M:%S)"
+  sleep 0.1
+done
+
+red=$(tput setaf 1)
+green=$(tput setaf 2)
+blue=$(tput setaf 4)
+normal=$(tput sgr0)
+
+echo
+printf "\n${red}!!! ${green}$1 ${blue}seconds passed ${red}!!!\n${normal}"
+echo
+

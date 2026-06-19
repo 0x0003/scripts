@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+# Using a cuesheet and a flac file, splits the latter into
+# multiple ones and writes tags to them, then removes the
+# two files given as initial inputs.
+#
+# Dependencies: shntool cuetools flac
+
+if [ $# -lt 2 ]; then
+  echo "Usage: $(basename $0) cuesheet.cue media.flac"
+  exit 1
+fi
+
+shnsplit -f "$1" -t %n\ -\ %t -o flac "$2" && rm "$2" && cuetag2.sh "$1" *.flac && rm "$1"
+

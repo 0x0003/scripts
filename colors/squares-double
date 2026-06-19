@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+
+leftmargin=5
+bwid=4  # block width
+ewid=2  # distance between the blocks
+rows=3  # number of rows to draw
+bch=" " # character used for drawing the blocks
+ech=" " # character used for drawing "empty" space
+
+function setcolor() {
+  tput setab $1 # bg
+  tput setaf $2 # fg
+}
+
+function resetcolor() {
+  tput sgr0
+}
+
+function draw() {
+  for (( i=0; i < $1; i++)); do
+    printf %s "$2"
+  done
+}
+
+printf '\n'
+for row in $(seq 1 $rows); do
+  draw "$leftmargin" "$ech"
+  for color in 0 1 2 3 4 5 6 7; do
+
+    if [[ row -eq 1 ]]; then
+      setcolor "$color" "$(($color+8))"
+      printf %s "${color}"
+      draw "$(($bwid-1))" "$bch"
+      resetcolor
+      draw "$(($ewid+$bwid-3))" "$ech"
+
+    elif [[ row -ne $rows ]]; then
+      setcolor "$color" "$(($color+8))"
+      draw "$bwid" "$bch"
+      setcolor "$(($color+8))" "$color"
+      draw "$(($bwid-3))" "$bch"
+      resetcolor
+      draw "$ewid" "$ech"
+
+    else
+      resetcolor
+      draw "$(($bwid-3))" "$ech"
+      setcolor "$(($color+8))" "$color"
+      if [[ $((${color}+8)) -gt 9 ]]; then
+        draw "$(($bwid-2))" "$bch"
+        printf %s "$((${color}+8))"
+      else
+        draw "$(($bwid-1))" "$bch"
+        printf %s "$((${color}+8))"
+      fi
+        resetcolor
+        draw "$ewid" "$ech"
+    fi
+
+  done
+  resetcolor
+  printf '\n'
+done
+printf '\n'
+

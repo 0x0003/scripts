@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+
+# toggle nix daemon proxy
+
+NIX_DAEMON_DIR=/run/systemd/system/nix-daemon.service.d
+
+if [ -f $NIX_DAEMON_DIR/override.conf ]; then
+   sudo rm $NIX_DAEMON_DIR/override.conf
+   sudo systemctl daemon-reload
+   sudo systemctl restart nix-daemon
+   echo "(nix) OFF"
+else
+   sudo mkdir $NIX_DAEMON_DIR 2>/dev/null
+   echo [Service] | sudo tee -a $NIX_DAEMON_DIR/override.conf > /dev/null
+   echo Environment="http_proxy=$PROXYADDRESS" | sudo tee -a $NIX_DAEMON_DIR/override.conf > /dev/null
+   echo Environment="https_proxy=$PROXYADDRESS" | sudo tee -a $NIX_DAEMON_DIR/override.conf > /dev/null
+   echo Environment="HTTP_PROXY=$PROXYADDRESS" | sudo tee -a $NIX_DAEMON_DIR/override.conf > /dev/null
+   echo Environment="HTTPS_PROXY=$PROXYADDRESS" | sudo tee -a $NIX_DAEMON_DIR/override.conf > /dev/null
+   echo Environment="all_proxy=$PROXYADDRESS" | sudo tee -a $NIX_DAEMON_DIR/override.conf > /dev/null
+   sudo systemctl daemon-reload
+   sudo systemctl restart nix-daemon
+   echo "(nix) ON @ $PROXYADDRESS"
+fi
+
