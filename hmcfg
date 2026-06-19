@@ -46,6 +46,7 @@ fallback() {
     deploy_secret() {
       local file="$1" dest="$2" mode="${3:-0644}"
       mkdir -p "$(dirname "$dest")"
+      [ -L "$dest" ] && rm -f "$dest"
       age -d -i "$AGE_KEY" "$file" > "$dest"
       chmod "$mode" "$dest"; track "$dest"
     }
