@@ -58,10 +58,10 @@ fallback() {
     deploy_secret "$HM/secrets/ipi-token.age" "/tmp/ipi-token"
     deploy_secret "$HM/secrets/dotfiles/proxychains-conf.age" "$HOME/.proxychains/proxychains.conf"
 
-    mkdir -p "$HOME/scripts"
+    mkdir -p "$HOME/.local/bin"
     for f in "$HM"/secrets/scripts/*.age; do
       [ -f "$f" ] || continue
-      deploy_secret "$f" "$HOME/scripts/$(basename "$f" .age)" "+x"
+      deploy_secret "$f" "$HOME/.local/bin/$(basename "$f" .age)" "+x"
     done
   fi
 
