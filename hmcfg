@@ -94,8 +94,7 @@ case "$SUB_CMD" in
       echo "Submodule '$1' not found in .gitmodules" >&2; exit 1
     }
     (cd "$HM/$submodule_path" && git push)
-    nix flake update --flake "$HM" "$1"
-    git -C "$HM" add flake.lock "$submodule_path" && git -C "$HM" commit -m "Bump $1"
+    git -C "$HM" add "$submodule_path" && git -C "$HM" commit -m "Bump $1"
     ;;
 
   unlink)
@@ -117,7 +116,7 @@ case "$SUB_CMD" in
     echo "Commands:"
     echo "  switch              Apply config (home-manager switch or fallback)"
     echo "  upgrade             nix flake update, then switch"
-    echo "  bump <submodule>    Push submodule, bump flake lock, commit"
+    echo "  bump <submodule>    Push submodule, commit pointer"
     echo "  unlink              Undo fallback bootstrap (only without Nix)"
     exit 1
     ;;
