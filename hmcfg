@@ -89,10 +89,12 @@ case "$SUB_CMD" in
 
   bump)
     [ $# -eq 1 ] || { echo "Usage: $0 bump <submodule> (see '$0' for help)" >&2; exit 1; }
-    [ -d "$HM/dotfiles/$1" ] || { echo "Submodule not found: dotfiles/$1" >&2; exit 1; }
-    (cd "$HM/dotfiles/$1" && git push)
+    submodule_path=$(git -C "$HM" config --file "$HM/.gitmodules" "submodule.$1.path" 2>/dev/null) || {
+      echo "Submodule '$1' not found in .gitmodules" >&2; exit 1
+    }
+    (cd "$HM/$submodule_path" && git push)
     nix flake update --flake "$HM" "$1"
-    git -C "$HM" add flake.lock "dotfiles/$1" && git -C "$HM" commit -m "Bump $1"
+    git -C "$HM" add flake.lock "$submodule_path" && git -C "$HM" commit -m "Bump $1"
     ;;
 
   unlink)
