@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+
+DIR="/mnt/e/Weab"
+LIST="list.md"
+
+builtin cd $DIR && eval $EDITOR $LIST
+

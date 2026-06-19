@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# play all webms and gifs from a thread with mpv
+
+playlist=/tmp/4chw_playlist
+
+wget -q -o /dev/null -O - $1 | \
+grep -o '<a href=['"'"'"][^"'"'"']*['"'"'"]' | \
+sed -e 's/^<a href=["'"'"']//' -e 's/["'"'"']$//' | \
+grep webm | \
+sed -e 's/^/https:/' | \
+sed 's/is2\.4chan/i\.4cdn/g' > $playlist &&
+mpv.exe --geometry=50%:50% --playlist=$(wslpath -w $playlist) &&
+rm $playlist
+

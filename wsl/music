@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+
+playlistdir="/mnt/f/Music/.playlists"
+playlistname="$(basename "$(pwd)").m3u"
+musicdir="Mus" # constant part of the path to music dir for error catching
+dirstrip='F\:\\Music\\' # part(s) of the path for stripping
+tmp=/tmp/mpm.tmp
+mediaplayer='mpv --load-scripts=no --script=~~/scripts/delete_file.lua --script=~~/scripts/uosc.lua --no-terminal --geometry=800x800 --panscan=1.0 --loop=no '
+
+show_help () {
+cat << HALP
+USAGE
+  music OPTIONS
+
+OPTIONS
+  h/help         show this message
+  p/pg/gen       generate playlist of current directory
+  mg/mgen        generate plalists of all depth 1 subdirectories
+  l/li/list      show all playlists
+  c/cont/content show contents of all playlists
+  s/search       search through playlists with a query,
+                 spaces are treated as wildcard
+  r/rand/random  play random track
+HALP
+}
+
+# TODO: Add checks for flac + cuesheet
+generate_playlist () {
+  rm -f "$playlistdir/$playlistname"
+
+  find . -type d |
+  while read -r subdir
+  do
+    for filename in "$subdir"/*
+    do
+      if [ "${filename: -4}" == ".mp3" ] || [ "${filename: -5}" == ".flac" ] || [ "${filename: -4}" == ".wma" ] || [ "${filename: -4}" == ".ogg" ] || [ "${filename: -4}" == ".m4a" ]
+      then
+        echo "$(wslpath -w "$(realpath "${filename}")")" > "$playlistdir/$playlistname"
+      fi
+    done
+  done
+}
+
+mass_gen () {
+  find . -maxdepth 1 -type d \( ! -name . \) -exec bash -c "cd '{}' && generate_playlist" \;
+}
+
+no_results () {
+  echo "No results."
+  rm -f $tmp
+  exit 0
+}
+
+search () {
+  cd "$playlistdir"
+  read -p "    Query > " "query_init"
+  query_init="$(echo "$query_init" | sed 's/\s/.*/g')"
+  playlist="$(grep -il "$query_init" *)"
+
+  if [[ -z $playlist ]]; then
+    no_results
+  fi
+
+  echo "$playlist" > $tmp
+  while (( $(cat "$tmp" | wc -l) > 1 )); do
+    clear
+    cat -n $tmp | sed "s/$dirstrip//" | rev | cut -f 2- -d '.' | rev
+    read -ep "    Playlist > " "query_secondary"
+    query_secondary="$(echo "$query_secondary" | sed 's/\s/.*/g')"
+    if [[ $query_secondary == ?(-)+([0-9]) ]]; then
+      playlist="$(sed -n "$query_secondary"p "$tmp")"
+    elif [[ -z $query_secondary ]]; then
+      playlist=$(sed -n 1p "$tmp")
+    else
+      playlist="$(grep -i "$query_secondary" "$tmp")"
+    fi
+    echo "$playlist" > $tmp
+  done
+  # -F"\.playlist_format"
+  if (( $(awk -F"\.m3u" '{print NF-1}' "$tmp" 2> /dev/null) < 1 )); then
+    no_results
+  fi
+
+  grep -i "$query_init" "$playlist" > "$tmp"
+  if (( $(cat "$tmp" | wc -l) > 1 )); then
+    while (( $(cat "$tmp" | wc -l) > 1 )); do
+      clear
+      cat -n $tmp | sed "s/$dirstrip//" | rev | cut -f 2- -d '.' | rev
+      read -ep "    Track > " "query_secondary"
+      query_secondary="$(echo "$query_secondary" | sed 's/\s/.*/g')"
+      if [[ $query_secondary == ?(-)+([0-9]) ]]; then
+        tracks="$(sed -n "$query_secondary"p "$tmp")"
+      elif [[ -z $query_secondary ]]; then
+        tracks="$(sed -n 1p "$tmp")"
+      else
+        tracks="$(grep -i "$query_secondary" "$tmp")"
+      fi
+      echo "$tracks" > "$tmp"
+    done
+    if (( $(awk -v IGNORECASE=1 -F "$musicdir" '{print NF-1}' "$tmp" 2> /dev/null) < 1 )); then
+      no_results
+    else
+      line="$(grep -Fin "$(sed -n 1p "$tmp")" "$playlist" | cut -f1 -d:)"
+      echo "    Playing: $(cat "$tmp")"
+      $mediaplayer --playlist-start=$(($line - 1)) "$playlist" & disown
+    fi
+  else
+    line="$(grep -in "$query_init" "$playlist" | cut -f1 -d:)"
+    echo "    Playing: $(cat "$tmp")"
+    $mediaplayer --playlist-start=$(($line - 1)) "$playlist" & disown
+  fi
+
+  rm -f $tmp
+}
+
+random_track () {
+  cd $playlistdir
+
+  cat * > "$tmp" 2> /dev/null
+  rand=$(( 1 + RANDOM % $(cat "$tmp" | wc -l) ))
+  selection="$(sed -n "$rand"p "$tmp")"
+  playlist="$(grep -Fl "$selection" *)"
+  line="$(grep -Fn "$selection" "$playlist" | cut -f1 -d:)"
+  echo "    Playing: $selection"
+  $mediaplayer --playlist-start=$(($line - 1)) "$playlist" & disown
+
+  rm -f $tmp
+}
+
+list () {
+  ls $playlistdir
+  search ${*:2}
+}
+
+content () {
+  cd "$playlistdir"
+  find . -type f -printf "\n%p\n" -exec cat {} \; | less -i
+  search ${*:2}
+}
+
+case $1 in
+  "h"|"help")
+    show_help
+    ;;
+  "l"|"li"|"list")
+    list
+    ;;
+  "c"|"cont"|"content")
+    content
+    ;;
+  "p"|"pg"|"gen")
+    generate_playlist
+    ;;
+  "mg"|"mgen")
+    mass_gen
+    ;;
+  "s"|"search")
+    search ${*:2}
+    ;;
+  "r"|"rand"|"random")
+    random_track
+    ;;
+  *)
+    echo "run 'music h' for help"
+  ;;
+esac
+

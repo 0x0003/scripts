@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+
+# get windows host (WSL gateway)
+gw=$(ip route | awk '/default/ {print $3}')
+
+# only rewrite resolv.conf if the gateway has changed
+if [ -n "$gw" ]; then
+  tmp=$(mktemp)
+  echo "nameserver $gw" > "$tmp"
+  if ! cmp -s "$tmp" /etc/resolv.conf 2>/dev/null; then
+    cp "$tmp" /etc/resolv.conf
+  fi
+  rm -f "$tmp"
+fi
+

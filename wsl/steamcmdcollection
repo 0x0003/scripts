@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Composes long steamcmd command to download a workshop
+# collection and outputs it to a file
+#
+# NOTE: Requires `jq`
+#
+
+GAME_ID="294100" # Rimworld
+OUT="./steamcmd_collection_${1}.ps1"
+DL_LOCATION="G:\Backups\games\\\\rimworld\collection_${1}"
+
+if [[ $# -eq 0 ]] ; then
+  echo "Usage: \`$(basename $0) <COLLECTION_ID>\`"
+  exit
+fi
+
+test -e ${OUT} && rm ${OUT}
+
+printf "steamcmd +force_install_dir ${DL_LOCATION} +login anonymous " >> ${OUT}
+curl -s --data "collectioncount=1&publishedfileids[0]=${1}" https://api.steampowered.com/ISteamRemoteStorage/GetCollectionDetails/v1/ \
+  | jq '.response.collectiondetails[] | .children[] | .publishedfileid' \
+  | sed "s/^/+workshop_download_item ${GAME_ID} /" | tr '\n' ' ' >> ${OUT}
+printf "+quit" >> ${OUT}
+
