@@ -10,7 +10,15 @@ fi
 
 MANIFEST="$HM/.bootstrap-manifest"
 SUB_CMD="${1:-}"; shift 2>/dev/null || true
-hm_switch() { home-manager switch --flake "$HM#$hm_target"; }
+hm_switch() {
+  # https://github.com/NixOS/nix/issues/13324
+  if git -C "$HM" diff --quiet --ignore-submodules=all 2>/dev/null; then
+    if git -C "$HM" diff --submodule 2>/dev/null | grep -q .; then
+      date +%s > "$HM/.clean"
+    fi
+  fi
+  home-manager switch --flake "$HM#$hm_target"
+}
 uname -r | grep -qiE 'microsoft|wsl' && hm_target=tuna-wsl || hm_target=tuna
 
 # fallback
