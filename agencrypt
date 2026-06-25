@@ -1,17 +1,33 @@
 #!/usr/bin/env bash
 
 KEY=""
+RECIPIENT=""
+RECIPIENTS_FILE=""
 src=""
 ARMOR=""
+ALL=""
 
 while test $# -gt 0; do
   case "$1" in
     -i)
       shift; KEY="${1?error: -i requires an argument}"; shift ;;
-    -a)
+    -r)
+      shift; RECIPIENT="${1?error: -r requires an argument}"; shift ;;
+    -R)
+      shift; RECIPIENTS_FILE="${1?error: -R requires an argument}"; shift ;;
+    -a|--armor)
       ARMOR="-a"; shift ;;
+    --all)
+      ALL=1; shift ;;
     -h|--help)
-      echo "Usage: $0 [-a] [-i <identity>] <file>"; exit 0 ;;
+      echo "Usage: $0 [-a] [--all] [-i <identity>|-r <recipient>|-R <file>] <file>"
+      echo ""
+      echo "  -a, --armor      use ASCII-armored output"
+      echo "  --all            encrypt to all keys in the identity file"
+      echo "  -i <identity>    use this identity file"
+      echo "  -r <recipient>   encrypt to a specific age pubkey"
+      echo "  -R <file>        encrypt to recipients listed in a file"
+      exit 0 ;;
     -*)
       echo "error: unknown option $1" >&2; exit 1 ;;
     *)
@@ -21,25 +37,49 @@ while test $# -gt 0; do
 done
 
 if [ -z "$src" ]; then
-  echo "Usage: $0 [-a] [-i <identity>] <file>"
+  echo "Usage: $0 [-a] [--all] [-i <identity>|-r <recipient>|-R <file>] <file>"
   exit 1
 fi
 
-if [ -z "$KEY" ]; then
-  for candidate in \
-    "$HOME/.config/age/dots-key.txt" \
-    "$HOME/.config/age/keys.txt" \
-    "$HOME/.ssh/id_ed25519" \
-    "$HOME/.ssh/id_rsa"
-  do
-    [ -f "$candidate" ] && { KEY="$candidate"; break; }
-  done
+if [ -z "$RECIPIENT" ] && [ -z "$RECIPIENTS_FILE" ]; then
+  if [ -z "$KEY" ]; then
+    for candidate in \
+      "$HOME/.config/age/keys.txt" \
+      "$HOME/.ssh/id_ed25519" \
+      "$HOME/.ssh/id_rsa"
+    do
+      [ -f "$candidate" ] && { KEY="$candidate"; break; }
+    done
+  fi
+
+  if [ -z "$KEY" ]; then
+    echo "error: no identity found; use -i <key>, -r <recipient>, or place a key at ~/.config/age/keys.txt" >&2
+    exit 1
+  fi
 fi
 
-if [ -z "$KEY" ]; then
-  echo "error: no identity found; use -i <key> or place one at ~/.config/age/keys.txt" >&2
-  exit 1
+if [ -n "$RECIPIENT" ] || [ -n "$RECIPIENTS_FILE" ]; then
+  ENCRYPT_ARGS=()
+  [ -n "$RECIPIENT" ] && ENCRYPT_ARGS+=(-r "$RECIPIENT")
+  [ -n "$RECIPIENTS_FILE" ] && ENCRYPT_ARGS+=(-R "$RECIPIENTS_FILE")
+  age -e $ARMOR "${ENCRYPT_ARGS[@]}" -o "$src.age" "$src"
+elif [ -n "$ALL" ]; then
+  age -e $ARMOR -i "$KEY" -o "$src.age" "$src"
+else
+  first_id=$(mktemp)
+  awk '!started && /^[[:space:]]*(#|$)/ {next} !started {started=1} started {if (/^[[:space:]]*$/) exit; print}' "$KEY" > "$first_id"
+  RECIP=$(age-keygen -y "$first_id" 2>/dev/null)
+  rm -f "$first_id"
+  if [ -z "$RECIP" ]; then
+    echo "error: could not derive recipient from first key in $KEY" >&2
+    exit 1
+  fi
+  printf 'Encrypting for the \033[35mFIRST DETECTED RECIPIENT:\033[0m\n'
+  if [ ${#RECIP} -gt 70 ]; then
+    echo "${RECIP:0:70} ..."
+  else
+    echo "$RECIP"
+  fi
+  age -e $ARMOR -r "$RECIP" -o "$src.age" "$src"
 fi
-
-age -e $ARMOR -i "$KEY" -o "$src.age" "$src"
 
