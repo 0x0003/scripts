@@ -22,8 +22,10 @@ while test $# -gt 0; do
     -h|--help)
       echo "Usage: $0 [-a] [--all] [-i <identity>|-r <recipient>|-R <file>] <file>"
       echo ""
+      echo "Encrypt a file with age to <file>.age."
+      echo ""
       echo "  -a, --armor      use ASCII-armored output"
-      echo "  --all            encrypt to all keys in the identity file"
+      echo "  --all            encrypt to all recipients in the identity file"
       echo "  -i <identity>    use this identity file"
       echo "  -r <recipient>   encrypt to a specific age pubkey"
       echo "  -R <file>        encrypt to recipients listed in a file"
