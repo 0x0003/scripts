@@ -24,7 +24,6 @@ fi
 
 if [ -z "$KEY" ]; then
   for candidate in \
-    "$HOME/.config/age/dots-key.txt" \
     "$HOME/.config/age/keys.txt" \
     "$HOME/.ssh/id_ed25519" \
     "$HOME/.ssh/id_rsa"
