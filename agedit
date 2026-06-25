@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+
+KEY=""
+src=""
+
+while test $# -gt 0; do
+  case "$1" in
+    -i)
+      shift; KEY="${1?error: -i requires an argument}"; shift ;;
+    -h|--help)
+      echo "Usage: $0 [-i <identity>] <file.age>"; exit 0 ;;
+    -*)
+      echo "error: unknown option $1" >&2; exit 1 ;;
+    *)
+      [ -n "$src" ] && { echo "error: unexpected argument $1" >&2; exit 1; }
+      src="$1"; shift ;;
+  esac
+done
+
+if [ -z "$src" ] || ! [[ "$src" =~ \.age$ ]]; then
+  echo "Usage: $0 [-i <identity>] <path/to/secret.age>"
+  exit 1
+fi
+
+if [ -z "$KEY" ]; then
+  for candidate in \
+    "$HOME/.config/age/dots-key.txt" \
+    "$HOME/.config/age/keys.txt" \
+    "$HOME/.ssh/id_ed25519" \
+    "$HOME/.ssh/id_rsa"
+  do
+    [ -f "$candidate" ] && { KEY="$candidate"; break; }
+  done
+fi
+
+if [ -z "$KEY" ]; then
+  echo "error: no identity found; use -i <key> or place one at ~/.config/age/keys.txt" >&2
+  exit 1
+fi
+tmp="$(mktemp /tmp/XXXXXXXXXX)"
+
+age -d -i "$KEY" "$src" > "$tmp"
+sum_before=$(md5sum "$tmp")
+
+# prevent vim/nvim from leaking decrypted content to disk via swap, backup,
+# undo, shada, modelines, or shell temp files
+EDITOR_OPTS=()
+case "$EDITOR" in
+  *nvim*)
+    EDITOR_OPTS=("--cmd" "au BufRead * setlocal nobackup nomodeline noshelltemp noswapfile noundofile nowritebackup shadafile=NONE") ;;
+  *vim*)
+    EDITOR_OPTS=("--cmd" "au BufRead * setlocal nobackup nomodeline noshelltemp noswapfile noundofile nowritebackup viminfo=\"\"") ;;
+esac
+
+${EDITOR:-vim} "${EDITOR_OPTS[@]}" "$tmp"
+sum_after=$(md5sum "$tmp")
+base_tmp=$(basename "$tmp")
+# emacs creates these by default and can't be configured via flags
+rm -f "/tmp/#${base_tmp}#" "/tmp/${base_tmp}~"
+
+if [ "$sum_before" != "$sum_after" ]; then
+  age -e -i "$KEY" -o "$src" "$tmp"
+  echo "$src changed; re-encrypting."
+else
+  echo "No changes."
+fi
+rm -f "$tmp"
+
