@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+
+KEY=""
+src=""
+ARMOR=""
+
+while test $# -gt 0; do
+  case "$1" in
+    -i)
+      shift; KEY="${1?error: -i requires an argument}"; shift ;;
+    -a)
+      ARMOR="-a"; shift ;;
+    -h|--help)
+      echo "Usage: $0 [-a] [-i <identity>] <file>"; exit 0 ;;
+    -*)
+      echo "error: unknown option $1" >&2; exit 1 ;;
+    *)
+      [ -n "$src" ] && { echo "error: unexpected argument $1" >&2; exit 1; }
+      src="$1"; shift ;;
+  esac
+done
+
+if [ -z "$src" ]; then
+  echo "Usage: $0 [-a] [-i <identity>] <file>"
+  exit 1
+fi
+
+if [ -z "$KEY" ]; then
+  for candidate in \
+    "$HOME/.config/age/dots-key.txt" \
+    "$HOME/.config/age/keys.txt" \
+    "$HOME/.ssh/id_ed25519" \
+    "$HOME/.ssh/id_rsa"
+  do
+    [ -f "$candidate" ] && { KEY="$candidate"; break; }
+  done
+fi
+
+if [ -z "$KEY" ]; then
+  echo "error: no identity found; use -i <key> or place one at ~/.config/age/keys.txt" >&2
+  exit 1
+fi
+
+age -e $ARMOR -i "$KEY" -o "$src.age" "$src"
+
