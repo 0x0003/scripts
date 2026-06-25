@@ -1,14 +1,31 @@
 #!/usr/bin/env bash
 
 KEY=""
+RECIPIENT=""
+RECIPIENTS_FILE=""
 src=""
+ALL=""
 
 while test $# -gt 0; do
   case "$1" in
     -i)
       shift; KEY="${1?error: -i requires an argument}"; shift ;;
+    -r)
+      shift; RECIPIENT="${1?error: -r requires an argument}"; shift ;;
+    -R)
+      shift; RECIPIENTS_FILE="${1?error: -R requires an argument}"; shift ;;
+    --all)
+      ALL=1; shift ;;
     -h|--help)
-      echo "Usage: $0 [-i <identity>] <file.age>"; exit 0 ;;
+      echo "Usage: $0 [--all] [-i <identity>|-r <recipient>|-R <file>] <file.age>"
+      echo ""
+      echo "Decrypt an .age file, open for editing, then re-encrypt on save."
+      echo ""
+      echo "  --all            re-encrypt to all recipients in the identity file"
+      echo "  -i <identity>    identity to decrypt with (auto-detected if omitted)"
+      echo "  -r <recipient>   re-encrypt to a specific age pubkey"
+      echo "  -R <file>        re-encrypt to recipients listed in a file"
+      exit 0 ;;
     -*)
       echo "error: unknown option $1" >&2; exit 1 ;;
     *)
@@ -18,7 +35,7 @@ while test $# -gt 0; do
 done
 
 if [ -z "$src" ] || ! [[ "$src" =~ \.age$ ]]; then
-  echo "Usage: $0 [-i <identity>] <path/to/secret.age>"
+  echo "Usage: $0 [--all] [-i <identity>|-r <recipient>|-R <file>] <path/to/secret.age>"
   exit 1
 fi
 
@@ -58,8 +75,31 @@ base_tmp=$(basename "$tmp")
 rm -f "/tmp/#${base_tmp}#" "/tmp/${base_tmp}~"
 
 if [ "$sum_before" != "$sum_after" ]; then
-  age -e -i "$KEY" -o "$src" "$tmp"
-  echo "$src changed; re-encrypting."
+  if [ -n "$RECIPIENT" ] || [ -n "$RECIPIENTS_FILE" ]; then
+    ENCRYPT_ARGS=()
+    [ -n "$RECIPIENT" ] && ENCRYPT_ARGS+=(-r "$RECIPIENT")
+    [ -n "$RECIPIENTS_FILE" ] && ENCRYPT_ARGS+=(-R "$RECIPIENTS_FILE")
+    age -e "${ENCRYPT_ARGS[@]}" -o "$src" "$tmp"
+    echo "$src re-encrypted to specified recipients."
+  elif [ -n "$ALL" ]; then
+    age -e -i "$KEY" -o "$src" "$tmp"
+  else
+    first_id=$(mktemp)
+    awk '!started && /^[[:space:]]*(#|$)/ {next} !started {started=1} started {if (/^[[:space:]]*$/) exit; print}' "$KEY" > "$first_id"
+    RECIP=$(age-keygen -y "$first_id" 2>/dev/null)
+    rm -f "$first_id"
+    if [ -z "$RECIP" ]; then
+      echo "error: could not derive recipient from first key in $KEY" >&2
+      exit 1
+    fi
+    printf 'Re-encrypting for the \033[35mFIRST DETECTED RECIPIENT:\033[0m\n'
+    if [ ${#RECIP} -gt 70 ]; then
+      echo "${RECIP:0:70} ..."
+    else
+      echo "$RECIP"
+    fi
+    age -e -r "$RECIP" -o "$src" "$tmp"
+  fi
 else
   echo "No changes."
 fi
