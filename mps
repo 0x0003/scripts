@@ -40,13 +40,13 @@ print_status() {
   local last
   last=$(mpc sticker "$FILE" get lastPlayed 2>/dev/null | sed 's/.*=//')
   if [[ -n "$last" ]]; then
-    echo -e "Last played at  ${B}$(date -d "@${last}" '+%Y-%m-%d %H:%M:%S')${N}"
+    echo -e "Last played  @${B}$(date -d "@${last}" '+%Y-%m-%d %H:%M:%S')${N}"
   fi
 
   local first
   first=$(mpc sticker "$FILE" get firstPlayed 2>/dev/null | sed 's/.*=//')
   if [[ -n "$first" ]]; then
-    echo -e "First played at ${C}$(date -d "@${first}" '+%Y-%m-%d %H:%M:%S')${N}"
+    echo -e "First played @${C}$(date -d "@${first}" '+%Y-%m-%d %H:%M:%S')${N}"
   fi
 
   echo
