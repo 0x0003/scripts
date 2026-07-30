@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""Generate an MPD playlist from a ListenBrainz playlist.
+
+Usage:
+  lbplaylist # latest Weekly Jams for $MUSICBRAINZ_USER
+  lbplaylist <uuid>
+  lbplaylist https://listenbrainz.org/playlist/<uuid>/
+"""
+
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+
+MPD_HOST = os.environ.get("MPD_HOST", "127.0.0.1")
+MPD_PORT = int(os.environ.get("MPD_PORT", "6600"))
+
+API_URL = "https://api.listenbrainz.org/1/playlist/{}"
+CREATEDFOR_URL = "https://api.listenbrainz.org/1/user/{}/playlists/createdfor"
+
+LB_USER = os.environ.get("MUSICBRAINZ_USER")
+
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def _is_wsl():
+    try:
+        with open("/proc/sys/kernel/osrelease") as f:
+            content = f.read().lower()
+            return "microsoft" in content or "wsl" in content
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _playlist_dir():
+    if _is_wsl():
+        try:
+            user = subprocess.run(
+                ["cmd.exe", "/c", "echo", "%USERNAME%"],
+                capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+        except (FileNotFoundError, subprocess.SubprocessError):
+            user = os.environ.get("USER", "")
+        return f"/mnt/c/Users/{user}/.local/share/mpd/playlists"
+    return os.path.expanduser("~/.local/share/mpd/playlists")
+
+
+def _fetch_json(url):
+    try:
+        with urllib.request.urlopen(url) as resp:
+            return json.loads(resp.read().decode())
+    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as e:
+        print(f"Error fetching {url}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _latest_weekly_jams_uuid():
+    data = _fetch_json(CREATEDFOR_URL.format(LB_USER))
+    matches = []
+    for entry in data.get("playlists", []):
+        pl = entry.get("playlist", {})
+        ext = pl.get("extension", {}).get("https://musicbrainz.org/doc/jspf#playlist", {})
+        meta = ext.get("additional_metadata", {})
+        algo = meta.get("algorithm_metadata", {})
+        if algo.get("source_patch") == "weekly-jams":
+            m = UUID_RE.search(pl.get("identifier", ""))
+            if m:
+                matches.append((pl.get("date", ""), m.group(0)))
+    if not matches:
+        print("No Weekly Jams playlist found", file=sys.stderr)
+        sys.exit(1)
+    matches.sort(key=lambda x: x[0], reverse=True)
+    return matches[0][1]
+
+
+def fetch_playlist(uuid):
+    return _fetch_json(API_URL.format(uuid))
+
+
+def mpd_connect():
+    host = MPD_HOST
+    password = None
+    if "@" in host:
+        password, host = host.split("@", 1)
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(10)
+    try:
+        s.connect((host, MPD_PORT))
+    except (socket.timeout, ConnectionRefusedError, OSError) as e:
+        print(f"Error connecting to MPD: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    data = s.recv(4096).decode()
+    if not data.startswith("OK MPD"):
+        print(f"Unexpected MPD greeting: {data.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    if password:
+        resp = mpd_command(s, f"password {password}")
+        if resp.startswith("ACK"):
+            print("MPD authentication failed", file=sys.stderr)
+            sys.exit(1)
+
+    return s
+
+
+def mpd_command(s, cmd):
+    s.sendall((cmd + "\n").encode())
+    data = b""
+    for _ in range(1000):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+        decoded = data.decode()
+        if not decoded:
+            continue
+        last = decoded.rstrip("\n").rsplit("\n", 1)[-1]
+        if last == "OK" or last.startswith("ACK"):
+            break
+    decoded = data.decode()
+    lines = decoded.rstrip("\n").split("\n")
+    if lines and lines[-1] == "OK":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def _quote(v):
+    return f'"{v}"' if re.search(r'[\s"\'\\]', v) else v
+
+
+def mpd_search(s, artist, title):
+    cmd = f'search artist {_quote(artist)} title {_quote(title)}'
+    resp = mpd_command(s, cmd)
+    if resp.startswith("ACK"):
+        return []
+    return [l[6:] for l in resp.split("\n") if l.startswith("file: ")]
+
+
+def mpd_search_title(s, title):
+    cmd = f'search title {_quote(title)}'
+    resp = mpd_command(s, cmd)
+    if resp.startswith("ACK"):
+        return []
+    return [l[6:] for l in resp.split("\n") if l.startswith("file: ")]
+
+
+def sanitize_filename(name):
+    name = re.sub(r"[^\w\s-]", "", name)
+    name = re.sub(r"[-_\s]+", "_", name.strip())
+    return name.lower()[:120] or "playlist"
+
+
+def main():
+    if len(sys.argv) < 2:
+        if not LB_USER:
+            print("Set MUSICBRAINZ_USER env var or pass a playlist URL", file=sys.stderr)
+            sys.exit(1)
+        uuid = _latest_weekly_jams_uuid()
+        print(f"Fetching latest Weekly Jams ({uuid})")
+    else:
+        m = UUID_RE.search(sys.argv[1])
+        if not m:
+            print(f"Usage: {sys.argv[0]} [playlist-url-or-uuid]", file=sys.stderr)
+            sys.exit(1)
+        uuid = m.group(0)
+
+    data = fetch_playlist(uuid)
+    playlist = data["playlist"]
+    tracks = playlist["track"]
+    title = playlist.get("title", "Untitled")
+
+    s = mpd_connect()
+    playlist_lines = []
+    not_found = []
+
+    for i, track in enumerate(tracks):
+        t_title = track.get("title", "")
+        t_artist = track.get("creator", "") or " ".join(
+            a["artist_credit_name"]
+            for a in track.get("extension", {})
+            .get("https://musicbrainz.org/doc/jspf#track", {})
+            .get("additional_metadata", {})
+            .get("artists", [])
+        )
+
+        files = mpd_search(s, t_artist, t_title)
+
+        if not files and "," in t_artist:
+            files = mpd_search(s, t_artist.split(",")[0].strip(), t_title)
+        if not files and "(" in t_title:
+            files = mpd_search(s, t_artist, t_title.split("(")[0].strip())
+        if not files and "[" in t_title:
+            files = mpd_search(s, t_artist, t_title.split("[")[0].strip())
+        if not files and ":" in t_title:
+            files = mpd_search(s, t_artist, t_title.split(":")[0].strip())
+        if not files and "feat." in t_artist:
+            files = mpd_search(s, t_artist.split("feat.")[0].strip(), t_title)
+        if not files and "&" in t_artist:
+            files = mpd_search(s, t_artist.split("&")[0].strip(), t_title)
+        if not files:
+            files = mpd_search_title(s, t_title)
+        if not files:
+            words = re.sub(r"[,:;.()\[\]!?/\\-]", " ", t_title).split()
+            for n in range(len(words), 0, -1):
+                files = mpd_search(s, t_artist, " ".join(words[:n]))
+                if files:
+                    break
+
+        if files:
+            playlist_lines.append(files[0])
+        else:
+            not_found.append(f"{i+1:3d}. {t_artist} — {t_title}")
+
+    s.close()
+
+    pdir = _playlist_dir()
+    os.makedirs(pdir, exist_ok=True)
+    name = sanitize_filename(title)
+    playlist_path = os.path.join(pdir, f"{name}.m3u")
+
+    with open(playlist_path, "w") as f:
+        for entry in playlist_lines:
+            f.write(entry + "\n")
+
+    print(f"Wrote {playlist_path}")
+    print(f"Matched {len(playlist_lines)}/{len(tracks)}")
+    if not_found:
+        print("Not found:")
+        for t in not_found:
+            print(f"  {t}")
+
+
+if __name__ == "__main__":
+    main()
