@@ -6,7 +6,7 @@ The cutoff is a relative duration (e.g. 1y, 6m, 2w, 30d, 1y6m) or an absolute
 date (e.g. 2025-01-01, meaning that day and earlier). Songs with no lastPlayed
 sticker at all are excluded.
 
-Writes lastplayed_<date>_YYYY-MM-DD_HH-MM-SS.m3u into the MPD playlist dir.
+Saves a playlist named lastplayed_<date>_YYYY-MM-DD_HH-MM-SS via MPD.
 
 Usage:
   mpd-lastplayed [song|album] [N] [date] [--no-shuffle] [--full] [--genre GENRE]
@@ -19,7 +19,6 @@ import os
 import random
 import re
 import socket
-import subprocess
 import sys
 
 MPD_HOST = os.environ.get("MPD_HOST", "127.0.0.1")
@@ -30,28 +29,6 @@ STICKER = "lastPlayed"
 
 REL_RE = re.compile(r"^(?:(\d+)y)?(?:(\d+)m)?(?:(\d+)w)?(?:(\d+)d)?$")
 ABS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
-
-def _is_wsl():
-    try:
-        with open("/proc/sys/kernel/osrelease") as f:
-            content = f.read().lower()
-            return "microsoft" in content or "wsl" in content
-    except (FileNotFoundError, OSError):
-        return False
-
-
-def _playlist_dir():
-    if _is_wsl():
-        try:
-            user = subprocess.run(
-                ["cmd.exe", "/c", "echo", "%USERNAME%"],
-                capture_output=True, text=True, timeout=5
-            ).stdout.strip()
-        except (FileNotFoundError, subprocess.SubprocessError):
-            user = os.environ.get("USER", "")
-        return f"/mnt/c/Users/{user}/.local/share/mpd/playlists"
-    return os.path.expanduser("~/.local/share/mpd/playlists")
 
 
 def mpd_connect():
@@ -133,6 +110,25 @@ def sticker_find_lastplayed(s):
 
 def _quote(v):
     return f'"{v}"' if re.search(r'[\s"\'\\]', v) else v
+
+
+def mpd_save_playlist(s, name, entries):
+    resp = mpd_command(s, f"playlistclear {_quote(name)}")
+    if resp.startswith("ACK") and "No such playlist" not in resp:
+        print(f"playlistclear failed: {resp}", file=sys.stderr)
+        sys.exit(1)
+    if not entries:
+        return
+    body = "\n".join(f"playlistadd {_quote(name)} {_quote(entry)}" for entry in entries)
+    resp = mpd_command(s, f"command_list_begin\n{body}\ncommand_list_end")
+    if resp.startswith("ACK"):
+        m = re.search(r"@(\d+)\]", resp)
+        if m and 0 <= int(m.group(1)) < len(entries):
+            print(f"playlistadd failed for {entries[int(m.group(1))]!r}: {resp}",
+                  file=sys.stderr)
+        else:
+            print(f"playlistadd failed: {resp}", file=sys.stderr)
+        sys.exit(1)
 
 
 def parse_genres(values):
@@ -325,7 +321,6 @@ def main():
     if needles:
         matched = genre_file_set(s, needles)
         pool = [f for f in all_files if f in matched]
-    s.close()
 
     stale = [f for f in pool if lastplayed.get(f, float("inf")) < cutoff_ts]
     if not stale:
@@ -352,20 +347,17 @@ def main():
             random.shuffle(stale)
         playlist = stale[:n]
 
-    pdir = _playlist_dir()
-    os.makedirs(pdir, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     name = re.sub(r"[^\w-]", "_", date)
     prefix = "lastplayed"
     if args.genre:
         prefix += "-" + ",".join(re.sub(r"[/\\]", "_", g).strip() for g in args.genre)
-    path = os.path.join(pdir, f"{prefix}_{name}_{stamp}.m3u")
+    plname = f"{prefix}_{name}_{stamp}"
 
-    with open(path, "w") as f:
-        for entry in playlist:
-            f.write(entry + "\n")
+    mpd_save_playlist(s, plname, playlist)
+    s.close()
 
-    print(f"Wrote {path}")
+    print(f"Saved playlist {plname}")
     print(f"Last played before {cutoff:%Y-%m-%d}: "
           f"{len(stale)} total, {len(playlist)} included")
 

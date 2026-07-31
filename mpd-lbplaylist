@@ -11,7 +11,6 @@ import json
 import os
 import re
 import socket
-import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -25,28 +24,6 @@ CREATEDFOR_URL = "https://api.listenbrainz.org/1/user/{}/playlists/createdfor"
 LB_USER = os.environ.get("MUSICBRAINZ_USER")
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-
-
-def _is_wsl():
-    try:
-        with open("/proc/sys/kernel/osrelease") as f:
-            content = f.read().lower()
-            return "microsoft" in content or "wsl" in content
-    except (FileNotFoundError, OSError):
-        return False
-
-
-def _playlist_dir():
-    if _is_wsl():
-        try:
-            user = subprocess.run(
-                ["cmd.exe", "/c", "echo", "%USERNAME%"],
-                capture_output=True, text=True, timeout=5
-            ).stdout.strip()
-        except (FileNotFoundError, subprocess.SubprocessError):
-            user = os.environ.get("USER", "")
-        return f"/mnt/c/Users/{user}/.local/share/mpd/playlists"
-    return os.path.expanduser("~/.local/share/mpd/playlists")
 
 
 def _fetch_json(url):
@@ -134,6 +111,25 @@ def _quote(v):
     return f'"{v}"' if re.search(r'[\s"\'\\]', v) else v
 
 
+def mpd_save_playlist(s, name, entries):
+    resp = mpd_command(s, f"playlistclear {_quote(name)}")
+    if resp.startswith("ACK") and "No such playlist" not in resp:
+        print(f"playlistclear failed: {resp}", file=sys.stderr)
+        sys.exit(1)
+    if not entries:
+        return
+    body = "\n".join(f"playlistadd {_quote(name)} {_quote(entry)}" for entry in entries)
+    resp = mpd_command(s, f"command_list_begin\n{body}\ncommand_list_end")
+    if resp.startswith("ACK"):
+        m = re.search(r"@(\d+)\]", resp)
+        if m and 0 <= int(m.group(1)) < len(entries):
+            print(f"playlistadd failed for {entries[int(m.group(1))]!r}: {resp}",
+                  file=sys.stderr)
+        else:
+            print(f"playlistadd failed: {resp}", file=sys.stderr)
+        sys.exit(1)
+
+
 def mpd_search(s, artist, title):
     cmd = f'search artist {_quote(artist)} title {_quote(title)}'
     resp = mpd_command(s, cmd)
@@ -217,18 +213,11 @@ def main():
         else:
             not_found.append(f"{i+1:3d}. {t_artist} — {t_title}")
 
+    name = sanitize_filename(title)
+    mpd_save_playlist(s, name, playlist_lines)
     s.close()
 
-    pdir = _playlist_dir()
-    os.makedirs(pdir, exist_ok=True)
-    name = sanitize_filename(title)
-    playlist_path = os.path.join(pdir, f"{name}.m3u")
-
-    with open(playlist_path, "w") as f:
-        for entry in playlist_lines:
-            f.write(entry + "\n")
-
-    print(f"Wrote {playlist_path}")
+    print(f"Saved playlist {name}")
     print(f"Matched {len(playlist_lines)}/{len(tracks)}")
     if not_found:
         print("Not found:")
