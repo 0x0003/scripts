@@ -197,11 +197,11 @@ EXAMPLES = """examples:
   mpd-neverplayed
       default: 100 never-played songs, shuffled
   mpd-neverplayed album 50
-      50 songs from whole albums of never-played tracks
+      50 never-played songs, grouped by album
   mpd-neverplayed album --whole 50
-      whole albums, even tracks that have been played before
+      whole albums, even songs that have been played before
   mpd-neverplayed album --whole 30 --genre "dark ambient,drone"
-      like above, limited to tracks matching those genres"""
+      like above, limited to songs matching those genres"""
 
 
 def main():
@@ -213,7 +213,8 @@ def main():
     )
     parser.add_argument(
         "mode", nargs="?", choices=("song", "album"), default="song",
-        help="shuffle individual songs (default) or whole albums",
+        help="shuffle individual songs (default) or whole albums. "
+             "NOTE: \"album\" is determined by directory structure, not tags!",
     )
     parser.add_argument(
         "n", nargs="?", type=int, default=DEFAULT_CAP,
@@ -225,12 +226,12 @@ def main():
     )
     parser.add_argument(
         "--whole", action="store_true",
-        help="album mode: include every track of an album, played or not, "
-             "if it contains at least one never-played track",
+        help="album mode: include every song of an album, played or not, "
+             "if it contains at least one never-played song",
     )
     parser.add_argument(
         "--genre", action="append", metavar="GENRE",
-        help="only include tracks whose genre contains GENRE (case-insensitive, "
+        help="only include songs whose genre contains GENRE (case-insensitive, "
              "comma-separated, repeatable)",
     )
 
