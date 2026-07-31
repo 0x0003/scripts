@@ -21,7 +21,14 @@ fi
 print_status() {
   local value=$1 old=$2
 
-  echo -e "${M}$(mpc current)${N}"
+  local artist title
+  artist=$(mpc current --format '%artist%')
+  title=$(mpc current --format '%title%')
+  if [[ -n "$artist" ]]; then
+    echo -e "${G}${artist}${N} • ${title}"
+  else
+    echo -e "${title}"
+  fi
   echo "---"
 
   echo -n "Rated  "
