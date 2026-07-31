@@ -21,7 +21,7 @@ MPD_HOST = os.environ.get("MPD_HOST", "127.0.0.1")
 MPD_PORT = int(os.environ.get("MPD_PORT", "6600"))
 
 DEFAULT_CAP = 100
-STICKER = "firstPlayed"
+STICKER = "lastPlayed"
 
 
 def _is_wsl():
@@ -207,7 +207,7 @@ EXAMPLES = """examples:
 def main():
     parser = argparse.ArgumentParser(
         prog="mpd-neverplayed",
-        description="Create a playlist of MPD songs without a firstPlayed sticker.",
+        description="Create a playlist of MPD songs without a lastPlayed sticker.",
         epilog=EXAMPLES,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
