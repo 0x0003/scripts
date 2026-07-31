@@ -249,7 +249,7 @@ EXAMPLES = """examples:
   mpd-lastplayed album 50 6m
       50 songs not played in the last 6 months, grouped by album
   mpd-lastplayed album --full 50 5y
-      full albums, even songs played recently
+      like above, but include albums in full, even if some songs are ineligible
   mpd-lastplayed album --full 30 5y --genre "dark ambient,drone"
       like above, limited to songs matching those genres"""
 
@@ -290,8 +290,7 @@ def main():
     )
     parser.add_argument(
         "--full", action="store_true",
-        help="album mode: include every song of an album, played or not, "
-             "if it contains at least one eligible song",
+        help="album mode: include every song of an album",
     )
     parser.add_argument(
         "--genre", action="append", metavar="GENRE",

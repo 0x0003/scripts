@@ -195,7 +195,7 @@ EXAMPLES = """examples:
   mpd-neverplayed album 50
       50 never-played songs, grouped by album
   mpd-neverplayed album --full 50
-      full albums, even songs that have been played before
+      like above, but include albums in full, even if some songs are ineligible
   mpd-neverplayed album --full 30 --genre "dark ambient,drone"
       like above, limited to songs matching those genres"""
 
@@ -222,8 +222,7 @@ def main():
     )
     parser.add_argument(
         "--full", action="store_true",
-        help="album mode: include every song of an album, played or not, "
-             "if it contains at least one never-played song",
+        help="album mode: include every song of an album",
     )
     parser.add_argument(
         "--genre", action="append", metavar="GENRE",
