@@ -196,8 +196,8 @@ EXAMPLES = """examples:
       50 never-played songs, grouped by album
   mpd-neverplayed album --full 50
       like above, but include albums in full, even if some songs are ineligible
-  mpd-neverplayed album --full 30 --genre "dark ambient,drone"
-      like above, limited to songs matching those genres"""
+  mpd-neverplayed album --full 50 --genre "dark ambient,drone"
+      like above, but filtered to songs only matching provided genres"""
 
 
 def main():
