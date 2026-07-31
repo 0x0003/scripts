@@ -10,7 +10,7 @@ Saves a playlist named lastplayed_<date>_YYYY-MM-DD_HH-MM-SS via MPD.
 
 Usage:
   mpd-lastplayed [song|album] [N] [date] [--from DATE] [--to DATE]
-                 [--no-shuffle] [--full] [--genre GENRE]
+                 [--no-shuffle] [--full] [--genre GENRE] [--plays N]
 """
 
 import argparse
@@ -27,6 +27,7 @@ MPD_PORT = int(os.environ.get("MPD_PORT", "6600"))
 
 DEFAULT_CAP = 100
 STICKER = "lastPlayed"
+PLAYCOUNT_STICKER = "playCount"
 
 REL_RE = re.compile(r"^(?:(\d+)y)?(?:(\d+)m)?(?:(\d+)w)?(?:(\d+)d)?$")
 ABS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -89,8 +90,8 @@ def list_all_files(s):
     return [line[6:] for line in resp.split("\n") if line.startswith("file: ")]
 
 
-def sticker_find_lastplayed(s):
-    resp = mpd_command(s, f'sticker find song "" {STICKER}')
+def sticker_find(s, name):
+    resp = mpd_command(s, f'sticker find song "" {name}')
     if resp.startswith("ACK"):
         print(f"sticker find failed: {resp}", file=sys.stderr)
         sys.exit(1)
@@ -100,8 +101,8 @@ def sticker_find_lastplayed(s):
         if line.startswith("file: "):
             current = line[6:]
         elif line.startswith("sticker: ") and current is not None:
-            name, _, value = line[9:].partition("=")
-            if name == STICKER:
+            sticker_name, _, value = line[9:].partition("=")
+            if sticker_name == name:
                 try:
                     result[current] = int(value)
                 except ValueError:
@@ -205,7 +206,7 @@ def _reorder_argv(argv):
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--genre", "--from", "--to"):
+        if a in ("--genre", "--from", "--to", "--plays"):
             flags.append(a)
             if i + 1 < len(argv):
                 i += 1
@@ -244,14 +245,16 @@ def _reorder_argv(argv):
 EXAMPLES = """examples:
   mpd-lastplayed 1y
       default: 100 songs not played in the last year, shuffled
-  mpd-lastplayed --from 1y --to 2y
-      100 songs last played between 1 and 2 years ago, shuffled
+  mpd-lastplayed 1y 80 --plays 2
+      80 songs not played in the last year, play count of 2 or less
+  mpd-lastplayed --from 1y --to 2y --no-shuffle
+      100 songs last played between 1 and 2 years ago, library order
   mpd-lastplayed album 50 6m
       50 songs not played in the last 6 months, grouped by album
   mpd-lastplayed album --full 50 5y
       like above, but include albums in full, even if some songs are ineligible
-  mpd-lastplayed album --full 30 5y --genre "dark ambient,drone"
-      like above, limited to songs matching those genres"""
+  mpd-lastplayed album --full 50 5y --genre "dark ambient,drone"
+      like above, but filtered to songs only matching provided genres"""
 
 
 def main():
@@ -297,6 +300,11 @@ def main():
         help="only include songs whose genre contains GENRE (case-insensitive, "
              "comma-separated, repeatable)",
     )
+    parser.add_argument(
+        "--plays", type=int, metavar="N",
+        help="only include songs with a playCount sticker of N or less; "
+             "songs without a playCount sticker are excluded",
+    )
 
     argv = _reorder_argv(sys.argv[1:])
     if argv is None:
@@ -311,9 +319,13 @@ def main():
     to_arg = args.to_date
     no_shuffle = args.no_shuffle
     full = args.full
+    plays = args.plays
 
     if n < 1:
         print("N must be a positive integer", file=sys.stderr)
+        sys.exit(1)
+    if plays is not None and plays < 0:
+        print("--plays must be a non-negative integer", file=sys.stderr)
         sys.exit(1)
     if full and mode != "album":
         print("--full requires mode 'album'", file=sys.stderr)
@@ -343,12 +355,16 @@ def main():
 
     s = mpd_connect()
     all_files = list_all_files(s)
-    lastplayed = sticker_find_lastplayed(s)
+    lastplayed = sticker_find(s, STICKER)
+    playcount = sticker_find(s, PLAYCOUNT_STICKER) if plays is not None else {}
     needles = parse_genres(args.genre) if args.genre else []
     pool = all_files
     if needles:
         matched = genre_file_set(s, needles)
         pool = [f for f in all_files if f in matched]
+    if plays is not None:
+        pool = [f for f in pool
+                if playcount.get(f) is not None and playcount[f] <= plays]
 
     def _in_range(f):
         played = lastplayed.get(f, float("inf"))
@@ -363,6 +379,8 @@ def main():
                   f"and {from_cutoff:%Y-%m-%d}")
         else:
             print(f"No songs with lastPlayed before {from_cutoff:%Y-%m-%d}")
+        if plays is not None:
+            print(f"and playCount <= {plays}")
         sys.exit(1)
 
     if mode == "album":
@@ -392,18 +410,21 @@ def main():
     prefix = "lastplayed"
     if args.genre:
         prefix += "-" + ",".join(re.sub(r"[/\\]", "_", g).strip() for g in args.genre)
+    if plays is not None:
+        prefix += f"-plays{plays}"
     plname = f"{prefix}_{name}_{stamp}"
 
     mpd_save_playlist(s, plname, playlist)
     s.close()
 
+    plays_note = f", playCount <= {plays}" if plays is not None else ""
     print(f"Saved playlist {plname}")
     if to_ts is not None:
         print(f"Last played between {to_cutoff:%Y-%m-%d} and "
-              f"{from_cutoff:%Y-%m-%d}: "
+              f"{from_cutoff:%Y-%m-%d}{plays_note}: "
               f"{len(stale)} total, {len(playlist)} included")
     else:
-        print(f"Last played before {from_cutoff:%Y-%m-%d}: "
+        print(f"Last played before {from_cutoff:%Y-%m-%d}{plays_note}: "
               f"{len(stale)} total, {len(playlist)} included")
 
 
