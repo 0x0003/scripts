@@ -9,7 +9,7 @@ sticker at all are excluded.
 Writes lastplayed_<date>_YYYY-MM-DD_HH-MM-SS.m3u into the MPD playlist dir.
 
 Usage:
-  mpd-lastplayed [song|album] [N] [date] [--no-shuffle] [--whole] [--genre GENRE]
+  mpd-lastplayed [song|album] [N] [date] [--no-shuffle] [--full] [--genre GENRE]
 """
 
 import argparse
@@ -249,9 +249,9 @@ EXAMPLES = """examples:
       default: 100 songs not played in the last year, shuffled
   mpd-lastplayed album 50 6m
       50 songs not played in the last 6 months, grouped by album
-  mpd-lastplayed album --whole 50 5y
-      whole albums, even songs played recently
-  mpd-lastplayed album --whole 30 5y --genre "dark ambient,drone"
+  mpd-lastplayed album --full 50 5y
+      full albums, even songs played recently
+  mpd-lastplayed album --full 30 5y --genre "dark ambient,drone"
       like above, limited to songs matching those genres"""
 
 
@@ -264,7 +264,7 @@ def main():
     )
     parser.add_argument(
         "mode", nargs="?", choices=("song", "album"), default="song",
-        help="shuffle individual songs (default) or whole albums. "
+        help="shuffle individual songs (default) or full albums. "
              "NOTE: \"album\" is determined by directory structure, not tags!",
     )
     parser.add_argument(
@@ -281,7 +281,7 @@ def main():
         help="keep library order instead of shuffling",
     )
     parser.add_argument(
-        "--whole", action="store_true",
+        "--full", action="store_true",
         help="album mode: include every song of an album, played or not, "
              "if it contains at least one eligible song",
     )
@@ -301,13 +301,13 @@ def main():
     n = args.n
     date = args.date
     no_shuffle = args.no_shuffle
-    whole = args.whole
+    full = args.full
 
     if n < 1:
         print("N must be a positive integer", file=sys.stderr)
         sys.exit(1)
-    if whole and mode != "album":
-        print("--whole requires mode 'album'", file=sys.stderr)
+    if full and mode != "album":
+        print("--full requires mode 'album'", file=sys.stderr)
         sys.exit(1)
     if not date:
         print("Date argument required (e.g. 1y, 6m, 2w, 30d, 2025-01-01)",
@@ -333,7 +333,7 @@ def main():
         sys.exit(1)
 
     if mode == "album":
-        if whole:
+        if full:
             albums = []
             for album in group_by_album(pool):
                 if any(lastplayed.get(f, float("inf")) < cutoff_ts for f in album):

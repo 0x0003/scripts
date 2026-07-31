@@ -5,7 +5,7 @@ A song counts as "never played" when it has no `lastPlayed` sticker.
 Writes neverplayed_YYYY-MM-DD_HH-MM-SS.m3u into the MPD playlist dir.
 
 Usage:
-  mpd-neverplayed [song|album] [N] [--no-shuffle] [--whole] [--genre GENRE]
+  mpd-neverplayed [song|album] [N] [--no-shuffle] [--full] [--genre GENRE]
 """
 
 import argparse
@@ -198,9 +198,9 @@ EXAMPLES = """examples:
       default: 100 never-played songs, shuffled
   mpd-neverplayed album 50
       50 never-played songs, grouped by album
-  mpd-neverplayed album --whole 50
-      whole albums, even songs that have been played before
-  mpd-neverplayed album --whole 30 --genre "dark ambient,drone"
+  mpd-neverplayed album --full 50
+      full albums, even songs that have been played before
+  mpd-neverplayed album --full 30 --genre "dark ambient,drone"
       like above, limited to songs matching those genres"""
 
 
@@ -213,7 +213,7 @@ def main():
     )
     parser.add_argument(
         "mode", nargs="?", choices=("song", "album"), default="song",
-        help="shuffle individual songs (default) or whole albums. "
+        help="shuffle individual songs (default) or full albums. "
              "NOTE: \"album\" is determined by directory structure, not tags!",
     )
     parser.add_argument(
@@ -225,7 +225,7 @@ def main():
         help="keep library order instead of shuffling",
     )
     parser.add_argument(
-        "--whole", action="store_true",
+        "--full", action="store_true",
         help="album mode: include every song of an album, played or not, "
              "if it contains at least one never-played song",
     )
@@ -244,8 +244,8 @@ def main():
     if args.n < 1:
         print("N must be a positive integer", file=sys.stderr)
         sys.exit(1)
-    if args.whole and args.mode != "album":
-        print("--whole requires mode 'album'", file=sys.stderr)
+    if args.full and args.mode != "album":
+        print("--full requires mode 'album'", file=sys.stderr)
         sys.exit(1)
 
     s = mpd_connect()
@@ -264,7 +264,7 @@ def main():
         sys.exit(1)
 
     if args.mode == "album":
-        if args.whole:
+        if args.full:
             albums = []
             for album in group_by_album(pool):
                 if any(f not in played for f in album):
