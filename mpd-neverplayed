@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Create a playlist of MPD songs that have never been played.
+
+A song counts as "never played" when it has no `lastPlayed` sticker.
+Writes neverplayed_YYYY-MM-DD_HH-MM-SS.m3u into the MPD playlist dir.
+
+Usage:
+  mpd-neverplayed [song|album] [N] [--no-shuffle] [--whole] [--genre GENRE]
+"""
+
+import argparse
+import datetime
+import os
+import random
+import re
+import socket
+import subprocess
+import sys
+
+MPD_HOST = os.environ.get("MPD_HOST", "127.0.0.1")
+MPD_PORT = int(os.environ.get("MPD_PORT", "6600"))
+
+DEFAULT_CAP = 100
+STICKER = "firstPlayed"
+
+
+def _is_wsl():
+    try:
+        with open("/proc/sys/kernel/osrelease") as f:
+            content = f.read().lower()
+            return "microsoft" in content or "wsl" in content
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _playlist_dir():
+    if _is_wsl():
+        try:
+            user = subprocess.run(
+                ["cmd.exe", "/c", "echo", "%USERNAME%"],
+                capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+        except (FileNotFoundError, subprocess.SubprocessError):
+            user = os.environ.get("USER", "")
+        return f"/mnt/c/Users/{user}/.local/share/mpd/playlists"
+    return os.path.expanduser("~/.local/share/mpd/playlists")
+
+
+def mpd_connect():
+    host = MPD_HOST
+    password = None
+    if "@" in host:
+        password, host = host.split("@", 1)
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(10)
+    try:
+        s.connect((host, MPD_PORT))
+    except (socket.timeout, ConnectionRefusedError, OSError) as e:
+        print(f"Error connecting to MPD: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    data = s.recv(4096).decode()
+    if not data.startswith("OK MPD"):
+        print(f"Unexpected MPD greeting: {data.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    if password:
+        resp = mpd_command(s, f"password {password}")
+        if resp.startswith("ACK"):
+            print("MPD authentication failed", file=sys.stderr)
+            sys.exit(1)
+
+    return s
+
+
+def mpd_command(s, cmd):
+    s.sendall((cmd + "\n").encode())
+    data = b""
+    for _ in range(1000):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+        decoded = data.decode(errors="replace")
+        if not decoded:
+            continue
+        last = decoded.rstrip("\n").rsplit("\n", 1)[-1]
+        if last == "OK" or last.startswith("ACK"):
+            break
+    decoded = data.decode(errors="replace")
+    lines = decoded.rstrip("\n").split("\n")
+    if lines and lines[-1] == "OK":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def list_all_files(s):
+    resp = mpd_command(s, "listall")
+    if resp.startswith("ACK"):
+        print(f"listall failed: {resp}", file=sys.stderr)
+        sys.exit(1)
+    return [line[6:] for line in resp.split("\n") if line.startswith("file: ")]
+
+
+def sticker_find_played(s):
+    resp = mpd_command(s, f'sticker find song "" {STICKER}')
+    if resp.startswith("ACK"):
+        print(f"sticker find failed: {resp}", file=sys.stderr)
+        sys.exit(1)
+    return {line[6:] for line in resp.split("\n") if line.startswith("file: ")}
+
+
+def _quote(v):
+    return f'"{v}"' if re.search(r'[\s"\'\\]', v) else v
+
+
+def parse_genres(values):
+    needles = []
+    for v in values:
+        for part in v.split(","):
+            part = part.strip().lower()
+            if part:
+                needles.append(part)
+    return needles
+
+
+def genre_file_set(s, needles):
+    resp = mpd_command(s, "list genre")
+    if resp.startswith("ACK"):
+        print(f"list genre failed: {resp}", file=sys.stderr)
+        sys.exit(1)
+    genres = [line[7:] for line in resp.split("\n") if line.startswith("Genre: ")]
+    matched = [g for g in genres if any(n in g.lower() for n in needles)]
+
+    files = set()
+    for g in matched:
+        resp = mpd_command(s, f"find genre {_quote(g)}")
+        if resp.startswith("ACK"):
+            print(f"find genre failed: {resp}", file=sys.stderr)
+            sys.exit(1)
+        for line in resp.split("\n"):
+            if line.startswith("file: "):
+                files.add(line[6:])
+    return files
+
+
+def group_by_album(files):
+    albums = []
+    index = {}
+    for f in files:
+        key = os.path.dirname(f)
+        bucket = index.get(key)
+        if bucket is None:
+            bucket = []
+            index[key] = bucket
+            albums.append(bucket)
+        bucket.append(f)
+    return albums
+
+
+def _reorder_argv(argv):
+    flags = []
+    pos = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--genre":
+            flags.append(a)
+            if i + 1 < len(argv):
+                i += 1
+                flags.append(argv[i])
+        elif a.startswith("--genre=") or a.startswith("-"):
+            flags.append(a)
+        else:
+            pos.append(a)
+        i += 1
+
+    mode = "song"
+    n = DEFAULT_CAP
+    if pos and pos[0] in ("song", "album"):
+        mode = pos.pop(0)
+    for a in pos:
+        if a in ("song", "album"):
+            return None
+        if a.isdigit():
+            if n != DEFAULT_CAP:
+                return None
+            n = int(a)
+        else:
+            return None
+
+    return [mode, str(n)] + flags
+
+
+EXAMPLES = """examples:
+  mpd-neverplayed
+      default: 100 never-played songs, shuffled
+  mpd-neverplayed album 50
+      50 songs from whole albums of never-played tracks
+  mpd-neverplayed album --whole 50
+      whole albums, even tracks that have been played before
+  mpd-neverplayed album --whole 30 --genre "dark ambient,drone"
+      like above, limited to tracks matching those genres"""
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="mpd-neverplayed",
+        description="Create a playlist of MPD songs without a firstPlayed sticker.",
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "mode", nargs="?", choices=("song", "album"), default="song",
+        help="shuffle individual songs (default) or whole albums",
+    )
+    parser.add_argument(
+        "n", nargs="?", type=int, default=DEFAULT_CAP,
+        help=f"max number of songs to include (default {DEFAULT_CAP})",
+    )
+    parser.add_argument(
+        "--no-shuffle", action="store_true",
+        help="keep library order instead of shuffling",
+    )
+    parser.add_argument(
+        "--whole", action="store_true",
+        help="album mode: include every track of an album, played or not, "
+             "if it contains at least one never-played track",
+    )
+    parser.add_argument(
+        "--genre", action="append", metavar="GENRE",
+        help="only include tracks whose genre contains GENRE (case-insensitive, "
+             "comma-separated, repeatable)",
+    )
+
+    argv = _reorder_argv(sys.argv[1:])
+    if argv is None:
+        print("Too many arguments", file=sys.stderr)
+        sys.exit(1)
+    args = parser.parse_args(argv)
+
+    if args.n < 1:
+        print("N must be a positive integer", file=sys.stderr)
+        sys.exit(1)
+    if args.whole and args.mode != "album":
+        print("--whole requires mode 'album'", file=sys.stderr)
+        sys.exit(1)
+
+    s = mpd_connect()
+    all_files = list_all_files(s)
+    played = sticker_find_played(s)
+    needles = parse_genres(args.genre) if args.genre else []
+    pool = all_files
+    if needles:
+        matched = genre_file_set(s, needles)
+        pool = [f for f in all_files if f in matched]
+    s.close()
+
+    never = [f for f in pool if f not in played]
+    if not never:
+        print("No never-played songs found")
+        sys.exit(1)
+
+    if args.mode == "album":
+        if args.whole:
+            albums = []
+            for album in group_by_album(pool):
+                if any(f not in played for f in album):
+                    albums.append(album)
+        else:
+            albums = group_by_album(never)
+        if not args.no_shuffle:
+            random.shuffle(albums)
+        playlist = []
+        for album in albums:
+            playlist.extend(album)
+            if len(playlist) >= args.n:
+                break
+    else:
+        if not args.no_shuffle:
+            random.shuffle(never)
+        playlist = never[:args.n]
+
+    pdir = _playlist_dir()
+    os.makedirs(pdir, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    name = "neverplayed"
+    if args.genre:
+        name += "-" + ",".join(re.sub(r"[/\\]", "_", g).strip() for g in args.genre)
+    path = os.path.join(pdir, f"{name}_{stamp}.m3u")
+
+    with open(path, "w") as f:
+        for entry in playlist:
+            f.write(entry + "\n")
+
+    print(f"Wrote {path}")
+    print(f"Never played: {len(never)} total, {len(playlist)} included")
+
+
+if __name__ == "__main__":
+    main()

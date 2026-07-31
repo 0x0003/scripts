@@ -1,0 +1,373 @@
+#!/usr/bin/env python3
+"""Create a playlist of MPD songs not played since a given cutoff.
+
+A song counts as "stale" when its `lastPlayed` sticker predates the cutoff.
+The cutoff is a relative duration (e.g. 1y, 6m, 2w, 30d, 1y6m) or an absolute
+date (e.g. 2025-01-01, meaning that day and earlier). Songs with no lastPlayed
+sticker at all are excluded.
+
+Writes lastplayed_<date>_YYYY-MM-DD_HH-MM-SS.m3u into the MPD playlist dir.
+
+Usage:
+  mpd-lastplayed [song|album] [N] [date] [--no-shuffle] [--whole] [--genre GENRE]
+"""
+
+import argparse
+import calendar
+import datetime
+import os
+import random
+import re
+import socket
+import subprocess
+import sys
+
+MPD_HOST = os.environ.get("MPD_HOST", "127.0.0.1")
+MPD_PORT = int(os.environ.get("MPD_PORT", "6600"))
+
+DEFAULT_CAP = 100
+STICKER = "lastPlayed"
+
+REL_RE = re.compile(r"^(?:(\d+)y)?(?:(\d+)m)?(?:(\d+)w)?(?:(\d+)d)?$")
+ABS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_wsl():
+    try:
+        with open("/proc/sys/kernel/osrelease") as f:
+            content = f.read().lower()
+            return "microsoft" in content or "wsl" in content
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _playlist_dir():
+    if _is_wsl():
+        try:
+            user = subprocess.run(
+                ["cmd.exe", "/c", "echo", "%USERNAME%"],
+                capture_output=True, text=True, timeout=5
+            ).stdout.strip()
+        except (FileNotFoundError, subprocess.SubprocessError):
+            user = os.environ.get("USER", "")
+        return f"/mnt/c/Users/{user}/.local/share/mpd/playlists"
+    return os.path.expanduser("~/.local/share/mpd/playlists")
+
+
+def mpd_connect():
+    host = MPD_HOST
+    password = None
+    if "@" in host:
+        password, host = host.split("@", 1)
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(10)
+    try:
+        s.connect((host, MPD_PORT))
+    except (socket.timeout, ConnectionRefusedError, OSError) as e:
+        print(f"Error connecting to MPD: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    data = s.recv(4096).decode()
+    if not data.startswith("OK MPD"):
+        print(f"Unexpected MPD greeting: {data.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    if password:
+        resp = mpd_command(s, f"password {password}")
+        if resp.startswith("ACK"):
+            print("MPD authentication failed", file=sys.stderr)
+            sys.exit(1)
+
+    return s
+
+
+def mpd_command(s, cmd):
+    s.sendall((cmd + "\n").encode())
+    data = b""
+    for _ in range(1000):
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+        decoded = data.decode(errors="replace")
+        if not decoded:
+            continue
+        last = decoded.rstrip("\n").rsplit("\n", 1)[-1]
+        if last == "OK" or last.startswith("ACK"):
+            break
+    decoded = data.decode(errors="replace")
+    lines = decoded.rstrip("\n").split("\n")
+    if lines and lines[-1] == "OK":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def list_all_files(s):
+    resp = mpd_command(s, "listall")
+    if resp.startswith("ACK"):
+        print(f"listall failed: {resp}", file=sys.stderr)
+        sys.exit(1)
+    return [line[6:] for line in resp.split("\n") if line.startswith("file: ")]
+
+
+def sticker_find_lastplayed(s):
+    resp = mpd_command(s, f'sticker find song "" {STICKER}')
+    if resp.startswith("ACK"):
+        print(f"sticker find failed: {resp}", file=sys.stderr)
+        sys.exit(1)
+    result = {}
+    current = None
+    for line in resp.split("\n"):
+        if line.startswith("file: "):
+            current = line[6:]
+        elif line.startswith("sticker: ") and current is not None:
+            name, _, value = line[9:].partition("=")
+            if name == STICKER:
+                try:
+                    result[current] = int(value)
+                except ValueError:
+                    pass
+    return result
+
+
+def _quote(v):
+    return f'"{v}"' if re.search(r'[\s"\'\\]', v) else v
+
+
+def parse_genres(values):
+    needles = []
+    for v in values:
+        for part in v.split(","):
+            part = part.strip().lower()
+            if part:
+                needles.append(part)
+    return needles
+
+
+def genre_file_set(s, needles):
+    resp = mpd_command(s, "list genre")
+    if resp.startswith("ACK"):
+        print(f"list genre failed: {resp}", file=sys.stderr)
+        sys.exit(1)
+    genres = [line[7:] for line in resp.split("\n") if line.startswith("Genre: ")]
+    matched = [g for g in genres if any(n in g.lower() for n in needles)]
+
+    files = set()
+    for g in matched:
+        resp = mpd_command(s, f"find genre {_quote(g)}")
+        if resp.startswith("ACK"):
+            print(f"find genre failed: {resp}", file=sys.stderr)
+            sys.exit(1)
+        for line in resp.split("\n"):
+            if line.startswith("file: "):
+                files.add(line[6:])
+    return files
+
+
+def group_by_album(files):
+    albums = []
+    index = {}
+    for f in files:
+        key = os.path.dirname(f)
+        bucket = index.get(key)
+        if bucket is None:
+            bucket = []
+            index[key] = bucket
+            albums.append(bucket)
+        bucket.append(f)
+    return albums
+
+
+def _subtract_months(dt, months):
+    total = dt.year * 12 + (dt.month - 1) - months
+    year, month0 = divmod(total, 12)
+    month = month0 + 1
+    day = min(dt.day, calendar.monthrange(year, month)[1])
+    return dt.replace(year=year, month=month, day=day)
+
+
+def parse_cutoff(arg):
+    if ABS_RE.match(arg):
+        day = datetime.datetime.strptime(arg, "%Y-%m-%d")
+        return day + datetime.timedelta(days=1)
+    m = REL_RE.match(arg)
+    if not m or not any(m.groups()):
+        print(f"Invalid date: {arg!r} "
+              "(use e.g. 1y, 6m, 2w, 30d, 1y6m, or 2025-01-01)",
+              file=sys.stderr)
+        sys.exit(1)
+    years, months, weeks, days = (int(g) if g else 0 for g in m.groups())
+    cutoff = _subtract_months(datetime.datetime.now(), years * 12 + months)
+    return cutoff - datetime.timedelta(weeks=weeks, days=days)
+
+
+def _reorder_argv(argv):
+    flags = []
+    pos = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--genre":
+            flags.append(a)
+            if i + 1 < len(argv):
+                i += 1
+                flags.append(argv[i])
+        elif a.startswith("--genre=") or a.startswith("-"):
+            flags.append(a)
+        else:
+            pos.append(a)
+        i += 1
+
+    mode = "song"
+    n = DEFAULT_CAP
+    date = None
+
+    if pos and pos[0] in ("song", "album"):
+        mode = pos.pop(0)
+
+    for a in pos:
+        if a in ("song", "album"):
+            return None
+        if a.isdigit():
+            if n != DEFAULT_CAP:
+                return None
+            n = int(a)
+        elif date is None:
+            date = a
+        else:
+            return None
+
+    new = [mode, str(n)]
+    if date is not None:
+        new.append(date)
+    return new + flags
+
+
+EXAMPLES = """examples:
+  mpd-lastplayed 1y
+      default: 100 songs not played in the last year, shuffled
+  mpd-lastplayed album 50 6m
+      50 songs from whole albums not played in the last 6 months
+  mpd-lastplayed album --whole 50 5y
+      whole albums, even tracks played recently
+  mpd-lastplayed album --whole 30 5y --genre "dark ambient,drone"
+      like above, limited to tracks matching those genres"""
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="mpd-lastplayed",
+        description="Create a playlist of MPD songs not played since a given cutoff.",
+        epilog=EXAMPLES,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "mode", nargs="?", choices=("song", "album"), default="song",
+        help="shuffle individual songs (default) or whole albums",
+    )
+    parser.add_argument(
+        "n", nargs="?", type=int, default=DEFAULT_CAP,
+        help=f"max number of songs to include (default {DEFAULT_CAP})",
+    )
+    parser.add_argument(
+        "date", nargs="?",
+        help="cutoff: relative duration (1y, 6m, 2w, 30d, 1y6m) or "
+             "absolute date (2025-01-01, meaning that day and earlier)",
+    )
+    parser.add_argument(
+        "--no-shuffle", action="store_true",
+        help="keep library order instead of shuffling",
+    )
+    parser.add_argument(
+        "--whole", action="store_true",
+        help="album mode: include every track of an album, played or not, "
+             "if it contains at least one eligible track",
+    )
+    parser.add_argument(
+        "--genre", action="append", metavar="GENRE",
+        help="only include tracks whose genre contains GENRE (case-insensitive, "
+             "comma-separated, repeatable)",
+    )
+
+    argv = _reorder_argv(sys.argv[1:])
+    if argv is None:
+        print("Too many arguments", file=sys.stderr)
+        sys.exit(1)
+    args = parser.parse_args(argv)
+
+    mode = args.mode
+    n = args.n
+    date = args.date
+    no_shuffle = args.no_shuffle
+    whole = args.whole
+
+    if n < 1:
+        print("N must be a positive integer", file=sys.stderr)
+        sys.exit(1)
+    if whole and mode != "album":
+        print("--whole requires mode 'album'", file=sys.stderr)
+        sys.exit(1)
+    if not date:
+        print("Date argument required (e.g. 1y, 6m, 2w, 30d, 2025-01-01)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    cutoff = parse_cutoff(date)
+    cutoff_ts = cutoff.timestamp()
+
+    s = mpd_connect()
+    all_files = list_all_files(s)
+    lastplayed = sticker_find_lastplayed(s)
+    needles = parse_genres(args.genre) if args.genre else []
+    pool = all_files
+    if needles:
+        matched = genre_file_set(s, needles)
+        pool = [f for f in all_files if f in matched]
+    s.close()
+
+    stale = [f for f in pool if lastplayed.get(f, float("inf")) < cutoff_ts]
+    if not stale:
+        print(f"No songs with lastPlayed before {cutoff:%Y-%m-%d}")
+        sys.exit(1)
+
+    if mode == "album":
+        if whole:
+            albums = []
+            for album in group_by_album(pool):
+                if any(lastplayed.get(f, float("inf")) < cutoff_ts for f in album):
+                    albums.append(album)
+        else:
+            albums = group_by_album(stale)
+        if not no_shuffle:
+            random.shuffle(albums)
+        playlist = []
+        for album in albums:
+            playlist.extend(album)
+            if len(playlist) >= n:
+                break
+    else:
+        if not no_shuffle:
+            random.shuffle(stale)
+        playlist = stale[:n]
+
+    pdir = _playlist_dir()
+    os.makedirs(pdir, exist_ok=True)
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    name = re.sub(r"[^\w-]", "_", date)
+    prefix = "lastplayed"
+    if args.genre:
+        prefix += "-" + ",".join(re.sub(r"[/\\]", "_", g).strip() for g in args.genre)
+    path = os.path.join(pdir, f"{prefix}_{name}_{stamp}.m3u")
+
+    with open(path, "w") as f:
+        for entry in playlist:
+            f.write(entry + "\n")
+
+    print(f"Wrote {path}")
+    print(f"Last played before {cutoff:%Y-%m-%d}: "
+          f"{len(stale)} total, {len(playlist)} included")
+
+
+if __name__ == "__main__":
+    main()
