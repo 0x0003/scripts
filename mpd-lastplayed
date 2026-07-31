@@ -9,7 +9,8 @@ sticker at all are excluded.
 Saves a playlist named lastplayed_<date>_YYYY-MM-DD_HH-MM-SS via MPD.
 
 Usage:
-  mpd-lastplayed [song|album] [N] [date] [--no-shuffle] [--full] [--genre GENRE]
+  mpd-lastplayed [song|album] [N] [date] [--from DATE] [--to DATE]
+                 [--no-shuffle] [--full] [--genre GENRE]
 """
 
 import argparse
@@ -204,12 +205,12 @@ def _reorder_argv(argv):
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a == "--genre":
+        if a in ("--genre", "--from", "--to"):
             flags.append(a)
             if i + 1 < len(argv):
                 i += 1
                 flags.append(argv[i])
-        elif a.startswith("--genre=") or a.startswith("-"):
+        elif a.startswith("-"):
             flags.append(a)
         else:
             pos.append(a)
@@ -243,6 +244,8 @@ def _reorder_argv(argv):
 EXAMPLES = """examples:
   mpd-lastplayed 1y
       default: 100 songs not played in the last year, shuffled
+  mpd-lastplayed --from 1y --to 2y
+      100 songs last played between 1 and 2 years ago, shuffled
   mpd-lastplayed album 50 6m
       50 songs not played in the last 6 months, grouped by album
   mpd-lastplayed album --full 50 5y
@@ -270,7 +273,16 @@ def main():
     parser.add_argument(
         "date", nargs="?",
         help="cutoff: relative duration (1y, 6m, 2w, 30d, 1y6m) or "
-             "absolute date (2025-01-01, meaning that day and earlier)",
+             "absolute date (2025-01-01, meaning that day and earlier); "
+             "alias for `--from DATE`",
+    )
+    parser.add_argument(
+        "--from", dest="from_date", metavar="DATE",
+        help="recent cutoff (default: positional date)",
+    )
+    parser.add_argument(
+        "--to", dest="to_date", metavar="DATE",
+        help="cutoff upper bound",
     )
     parser.add_argument(
         "--no-shuffle", action="store_true",
@@ -296,6 +308,8 @@ def main():
     mode = args.mode
     n = args.n
     date = args.date
+    from_arg = args.from_date
+    to_arg = args.to_date
     no_shuffle = args.no_shuffle
     full = args.full
 
@@ -305,13 +319,28 @@ def main():
     if full and mode != "album":
         print("--full requires mode 'album'", file=sys.stderr)
         sys.exit(1)
+    if from_arg and date:
+        print("Date given both positionally and via --from", file=sys.stderr)
+        sys.exit(1)
+    if from_arg:
+        date = from_arg
+    if to_arg and not date:
+        print("--to requires a base cutoff (positional date or --from)",
+              file=sys.stderr)
+        sys.exit(1)
     if not date:
         print("Date argument required (e.g. 1y, 6m, 2w, 30d, 2025-01-01)",
               file=sys.stderr)
         sys.exit(1)
 
-    cutoff = parse_cutoff(date)
-    cutoff_ts = cutoff.timestamp()
+    from_cutoff = parse_cutoff(date)
+    from_ts = from_cutoff.timestamp()
+    to_cutoff = parse_cutoff(to_arg) if to_arg else None
+    to_ts = to_cutoff.timestamp() if to_cutoff else None
+    if to_ts is not None and to_ts > from_ts:
+        print("--to must be an older cutoff than --from (e.g. --from 1y --to 2y)",
+              file=sys.stderr)
+        sys.exit(1)
 
     s = mpd_connect()
     all_files = list_all_files(s)
@@ -322,16 +351,26 @@ def main():
         matched = genre_file_set(s, needles)
         pool = [f for f in all_files if f in matched]
 
-    stale = [f for f in pool if lastplayed.get(f, float("inf")) < cutoff_ts]
+    def _in_range(f):
+        played = lastplayed.get(f, float("inf"))
+        if to_ts is not None and played < to_ts:
+            return False
+        return played < from_ts
+
+    stale = [f for f in pool if _in_range(f)]
     if not stale:
-        print(f"No songs with lastPlayed before {cutoff:%Y-%m-%d}")
+        if to_ts is not None:
+            print(f"No songs with lastPlayed between {to_cutoff:%Y-%m-%d} "
+                  f"and {from_cutoff:%Y-%m-%d}")
+        else:
+            print(f"No songs with lastPlayed before {from_cutoff:%Y-%m-%d}")
         sys.exit(1)
 
     if mode == "album":
         if full:
             albums = []
             for album in group_by_album(pool):
-                if any(lastplayed.get(f, float("inf")) < cutoff_ts for f in album):
+                if any(_in_range(f) for f in album):
                     albums.append(album)
         else:
             albums = group_by_album(stale)
@@ -349,6 +388,8 @@ def main():
 
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     name = re.sub(r"[^\w-]", "_", date)
+    if to_arg:
+        name = f"{name}-{re.sub(r'[^\w-]', '_', to_arg)}"
     prefix = "lastplayed"
     if args.genre:
         prefix += "-" + ",".join(re.sub(r"[/\\]", "_", g).strip() for g in args.genre)
@@ -358,8 +399,13 @@ def main():
     s.close()
 
     print(f"Saved playlist {plname}")
-    print(f"Last played before {cutoff:%Y-%m-%d}: "
-          f"{len(stale)} total, {len(playlist)} included")
+    if to_ts is not None:
+        print(f"Last played between {to_cutoff:%Y-%m-%d} and "
+              f"{from_cutoff:%Y-%m-%d}: "
+              f"{len(stale)} total, {len(playlist)} included")
+    else:
+        print(f"Last played before {from_cutoff:%Y-%m-%d}: "
+              f"{len(stale)} total, {len(playlist)} included")
 
 
 if __name__ == "__main__":
