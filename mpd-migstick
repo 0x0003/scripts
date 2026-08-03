@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""Migrate MPD stickers from "stale" URIs to their new locations.
+
+For each stale file carrying stickers, searches the MPD database for the same
+song (MBID, tags, duration, fuzzy filename) and, on confirmation, copies the
+rating, firstPlayed, playCount and lastPlayed stickers to the target.
+
+Usage:
+  mpd-migstick [--uri PREFIX] [-n] [-f]
+"""
+
+import argparse
+import datetime
+import os
+import re
+import socket
+import sys
+import unicodedata
+
+MPD_HOST = os.environ.get("MPD_HOST", "127.0.0.1")
+MPD_PORT = int(os.environ.get("MPD_PORT", "6600"))
+
+STICKERS = ("rating", "firstPlayed", "playCount", "lastPlayed")
+STICKER_ORDER = {"playCount": 0, "lastPlayed": 1, "firstPlayed": 2, "rating": 3}
+DEFAULT_URI = "_slskd"
+
+PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
+SPACE_RE = re.compile(r"\s+")
+TRACK_PREFIX_RE = re.compile(r"^\d{1,3}\s*[.\-_) ]+")
+EXT_RE = re.compile(r"\.[^.]+$")
+
+
+def mpd_connect():
+    host = MPD_HOST
+
+    password = None
+    if "@" in host:
+        password, host = host.split("@", 1)
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(10)
+
+    try:
+        s.connect((host, MPD_PORT))
+    except (socket.timeout, ConnectionRefusedError, OSError) as e:
+        print(f"Error connecting to MPD: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    data = s.recv(4096).decode()
+    if not data.startswith("OK MPD"):
+        print(f"Unexpected MPD greeting: {data.strip()}", file=sys.stderr)
+        sys.exit(1)
+
+    if password:
+        resp = mpd_command(s, f"password {password}")
+        if resp.startswith("ACK"):
+            print("MPD authentication failed", file=sys.stderr)
+            sys.exit(1)
+
+    return s
+
+
+def mpd_command(s, cmd):
+    s.sendall((cmd + "\n").encode())
+    buf = b""
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+        tail = buf.decode(errors="replace").rstrip("\n").rsplit("\n", 1)[-1]
+        if tail == "OK" or tail.startswith("ACK"):
+            break
+    lines = buf.decode(errors="replace").rstrip("\n").split("\n")
+    if lines and lines[-1] == "OK":
+        lines = lines[:-1]
+    return "\n".join(lines)
+
+
+def _quote(v):
+    s = str(v).replace("\\", "\\\\").replace('"', '\\"')
+    if re.search(r'[\s"\'\\]', s):
+        return f'"{s}"'
+    return s
+
+
+def parse_files(resp):
+    return [line[6:] for line in resp.split("\n") if line.startswith("file: ")]
+
+
+def parse_songs(resp):
+    songs = []
+    current = None
+    for line in resp.split("\n"):
+        if line.startswith("file: "):
+            if current is not None:
+                songs.append(current)
+            current = {"file": line[6:], "tags": {}}
+        elif current is not None and ": " in line:
+            key, _, value = line.partition(": ")
+            current["tags"].setdefault(key, []).append(value)
+    if current is not None:
+        songs.append(current)
+    return songs
+
+
+def parse_stickers(resp):
+    stickers = {}
+    for line in resp.split("\n"):
+        if line.startswith("sticker: "):
+            name, _, value = line[9:].partition("=")
+            stickers[name] = value
+    return stickers
+
+
+def first(tags, key):
+    vals = tags.get(key)
+    return vals[0] if vals else None
+
+
+def _int_or_none(v):
+    if v is None:
+        return None
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_text(s):
+    s = unicodedata.normalize("NFC", s).casefold()
+    s = PUNCT_RE.sub(" ", s)
+    return SPACE_RE.sub(" ", s).strip()
+
+
+def basename_key(path):
+    base = path.rsplit("/", 1)[-1]
+    base = EXT_RE.sub("", base)
+    base = TRACK_PREFIX_RE.sub("", base)
+    return normalize_text(base)
+
+
+def _title_contains(sub, full):
+    if len(sub) < 4:
+        return False
+    i = full.find(sub)
+    if i < 0:
+        return False
+    return (i == 0 or full[i - 1] == " ") and (
+        i + len(sub) == len(full) or full[i + len(sub)] == " "
+    )
+
+
+def score_match(src_tags, cand_tags, src_base, cand_base):
+    score = 0
+    mbid_hit = False
+    title_exact = False
+    title_sub = False
+    artist_hit = False
+    album_hit = False
+    dur_hit = False
+    base_hit = False
+
+    s_mbid = first(src_tags, "MUSICBRAINZ_TRACKID")
+    c_mbid = first(cand_tags, "MUSICBRAINZ_TRACKID")
+    if s_mbid and c_mbid and s_mbid.casefold() == c_mbid.casefold():
+        score += 100
+        mbid_hit = True
+
+    s_title = normalize_text(first(src_tags, "Title") or "")
+    c_title = normalize_text(first(cand_tags, "Title") or "")
+    if s_title and s_title == c_title:
+        score += 40
+        title_exact = True
+    elif s_title and c_title and (
+        _title_contains(s_title, c_title) or _title_contains(c_title, s_title)
+    ):
+        score += 20
+        title_sub = True
+
+    s_artist = normalize_text(first(src_tags, "Artist") or "")
+    c_artist = normalize_text(first(cand_tags, "Artist") or "")
+    if s_artist and s_artist == c_artist:
+        score += 30
+        artist_hit = True
+
+    s_album = normalize_text(first(src_tags, "Album") or "")
+    c_album = normalize_text(first(cand_tags, "Album") or "")
+    if s_album and s_album == c_album:
+        score += 20
+        album_hit = True
+
+    s_albumartist = normalize_text(first(src_tags, "AlbumArtist") or "")
+    c_albumartist = normalize_text(first(cand_tags, "AlbumArtist") or "")
+    if s_albumartist and c_albumartist == s_albumartist and s_albumartist != s_artist:
+        score += 5
+
+    s_time = _int_or_none(first(src_tags, "Time"))
+    c_time = _int_or_none(first(cand_tags, "Time"))
+    if s_time is not None and c_time is not None:
+        diff = abs(s_time - c_time)
+        if diff <= 2:
+            score += 15
+            dur_hit = True
+        elif diff <= 10:
+            score += 8
+            dur_hit = True
+
+    if cand_base and cand_base == src_base:
+        score += 25
+        base_hit = True
+    elif s_title and cand_base and s_title in cand_base:
+        score += 10
+
+    plausible = mbid_hit or (
+        title_exact and (artist_hit or album_hit or dur_hit or base_hit)
+    ) or (title_sub and (artist_hit or album_hit))
+    return score, plausible
+
+
+def find_candidates(s, src_uri, src_tags, prefix):
+    queries = []
+    mbid = first(src_tags, "MUSICBRAINZ_TRACKID")
+    title = first(src_tags, "Title")
+    artist = first(src_tags, "Artist")
+    if mbid:
+        queries.append(("MUSICBRAINZ_TRACKID", mbid))
+    if title:
+        queries.append(("title", title))
+    if artist:
+        queries.append(("artist", artist))
+    if not queries:
+        return {}
+
+    results = {}
+    for tag, value in queries:
+        resp = mpd_command(s, f"search {tag} {_quote(value)}")
+        if resp.startswith("ACK"):
+            continue
+        for song in parse_songs(resp):
+            uri = song["file"]
+            if uri == src_uri or uri.startswith(prefix + "/"):
+                continue
+            results.setdefault(uri, song)
+    return results
+
+
+def rank_candidates(src_tags, src_base, candidates):
+    ranked = []
+    for uri, song in candidates.items():
+        tags = song.get("tags", {})
+        score, plausible = score_match(src_tags, tags, src_base, basename_key(uri))
+        if plausible:
+            ranked.append((score, uri, tags))
+    ranked.sort(key=lambda x: (-x[0], x[1]))
+    return ranked
+
+
+def merge_stickers(src_stickers, dst_stickers):
+    updates = []
+    if "rating" in src_stickers and "rating" not in dst_stickers:
+        updates.append(("rating", src_stickers["rating"]))
+    if "firstPlayed" in src_stickers:
+        s = _int_or_none(src_stickers["firstPlayed"])
+        d = _int_or_none(dst_stickers.get("firstPlayed"))
+        if s is not None and d is not None:
+            updates.append(("firstPlayed", str(min(s, d))))
+        else:
+            updates.append(("firstPlayed", src_stickers["firstPlayed"]))
+    if "playCount" in src_stickers:
+        s = _int_or_none(src_stickers["playCount"]) or 0
+        d = _int_or_none(dst_stickers.get("playCount")) or 0
+        updates.append(("playCount", str(s + d)))
+    if "lastPlayed" in src_stickers:
+        s = _int_or_none(src_stickers["lastPlayed"])
+        d = _int_or_none(dst_stickers.get("lastPlayed"))
+        if s is not None and (d is None or s > d):
+            updates.append(("lastPlayed", src_stickers["lastPlayed"]))
+    return updates
+
+
+def fmt_ts(value):
+    n = _int_or_none(value)
+    if n is None:
+        return "?"
+    try:
+        return datetime.datetime.fromtimestamp(n).strftime("%Y-%m-%d %H:%M")
+    except (OSError, OverflowError, ValueError):
+        return "?"
+
+
+def fmt_stickers(stickers):
+    parts = []
+    for name in sorted(stickers, key=lambda n: STICKER_ORDER.get(n, 99)):
+        if name in ("firstPlayed", "lastPlayed"):
+            parts.append(f"{name}={fmt_ts(stickers[name])}")
+        else:
+            parts.append(f"{name}={stickers[name]}")
+    return ", ".join(parts)
+
+
+def format_updates(updates, dst_stickers, src_stickers):
+    width = max(len(name) for name, _ in updates)
+    lines = []
+    for name, value in sorted(updates, key=lambda u: STICKER_ORDER.get(u[0], 99)):
+        if name == "playCount":
+            s = _int_or_none(src_stickers.get("playCount")) or 0
+            d = _int_or_none(dst_stickers.get("playCount")) or 0
+            value = f"{value} ([{s}] + {d})"
+        elif name in ("firstPlayed", "lastPlayed"):
+            value = fmt_ts(value)
+        lines.append(f"    {name:>{width}}: {value}")
+    return lines
+
+
+def print_plans(plans, src_stickers):
+    numbered = len(plans) > 1
+    for idx, (score, c_uri, dst, updates) in enumerate(plans, 1):
+        if numbered:
+            print(f" #{idx} -> {c_uri} (score {score})")
+        else:
+            print(f" -> {c_uri} (score {score})")
+        for line in format_updates(updates, dst, src_stickers):
+            print(line)
+
+
+def _prompt(msg):
+    try:
+        return input(msg)
+    except EOFError:
+        return ""
+
+
+def ask_target(plans):
+    if len(plans) == 1:
+        answer = _prompt("  Copy stickers to this file? [Y/n] ").strip().lower()
+        return None if answer in ("n", "no") else plans[0][1]
+    while True:
+        answer = _prompt(
+            f"  Copy stickers to which target? [1-{len(plans)}, 0=none] "
+        ).strip()
+        if not answer or answer in ("0", "n", "no", "skip"):
+            return None
+        try:
+            idx = int(answer)
+        except ValueError:
+            print("  enter a number or 0", file=sys.stderr)
+            continue
+        if 1 <= idx <= len(plans):
+            return plans[idx - 1][1]
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="mpd-migstick",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--uri", default=DEFAULT_URI,
+        help=f"stale URI prefix (default: {DEFAULT_URI})",
+    )
+    parser.add_argument(
+        "-n", "--dry-run", action="store_true",
+        help="do not make any modifications to the targets",
+    )
+    parser.add_argument(
+        "-f", "--force", action="store_true",
+        help="automatically pick the best match and copy without prompting",
+    )
+    args = parser.parse_args()
+
+    prefix = args.uri.rstrip("/")
+    s = mpd_connect()
+
+    try:
+        known = set()
+        for name in STICKERS:
+            resp = mpd_command(s, f"sticker find song {_quote(prefix)} {name}")
+            if resp.startswith("ACK"):
+                print(f"sticker find failed: {resp}", file=sys.stderr)
+                sys.exit(1)
+            known.update(parse_files(resp))
+
+        if not known:
+            print(f"No stickers found under {prefix}/")
+            return
+
+        copied = 0
+        for uri in sorted(known):
+            stickers = parse_stickers(
+                mpd_command(s, f"sticker list song {_quote(uri)}")
+            )
+            if not stickers:
+                continue
+
+            src_tags = {}
+            resp = mpd_command(s, f"find filename {_quote(uri)}")
+            songs = parse_songs(resp)
+            if songs:
+                src_tags = songs[0]["tags"]
+
+            src_base = basename_key(uri)
+            candidates = find_candidates(s, uri, src_tags, prefix)
+            ranked = rank_candidates(src_tags, src_base, candidates)
+
+            plans = []
+            for score, c_uri, c_tags in ranked:
+                dst = parse_stickers(
+                    mpd_command(s, f"sticker list song {_quote(c_uri)}")
+                )
+                updates = merge_stickers(stickers, dst)
+                if updates:
+                    plans.append((score, c_uri, dst, updates))
+
+            print(f"\n[{uri}]")
+
+            if not plans:
+                print("  no match found in the database")
+            elif args.dry_run:
+                print_plans(plans, stickers)
+            else:
+                print(f" stickers: {fmt_stickers(stickers)}")
+                print_plans(plans, stickers)
+                target = plans[0][1] if args.force else ask_target(plans)
+                if target:
+                    for name, value in plans[
+                        next(i for i, p in enumerate(plans) if p[1] == target)
+                    ][3]:
+                        resp = mpd_command(
+                            s,
+                            f"sticker set song {_quote(target)} {name} {_quote(value)}",
+                        )
+                        if resp.startswith("ACK"):
+                            print(
+                                f"  sticker set {name} failed: {resp}",
+                                file=sys.stderr,
+                            )
+                    copied += 1
+                    print(f"  copied to {target}")
+
+                    for name in stickers:
+                        resp = mpd_command(
+                            s, f"sticker delete song {_quote(uri)} {name}"
+                        )
+                        if resp.startswith("ACK"):
+                            print(
+                                f"  sticker delete {name} failed: {resp}",
+                                file=sys.stderr,
+                            )
+
+        print(
+            f"\nDone. {len(known)} file(s) with stickers under {prefix}/, "
+            f"{copied} copy(ies) performed."
+        )
+    finally:
+        s.close()
+
+
+if __name__ == "__main__":
+    main()
